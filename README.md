@@ -53,6 +53,7 @@ Open **http://localhost:8088**, create your administrator, then follow **connect
 | [Architecture](docs/ARCHITECTURE.md) | Components, lifecycle diagrams, authorization, accounting and source map |
 | [Connection protocol](docs/PROTOCOL.md) | Discover, bind and invoke; independent SDK and reference server |
 | [Capability reference](docs/CAPABILITIES.md) | Full feature matrix and management API entry points |
-| [Validation & scope](docs/RELEASE.md) | 51 automated tests, exercised flows, provider boundaries and current limits |
+| [Technical architecture review](docs/TECHNICAL_REVIEW.md) | Findings, corrected designs, regression evidence and deployment boundaries |
+| [Validation & scope](docs/RELEASE.md) | 92 automated tests, exercised flows, provider boundaries and current limits |
 
-**Current release: 1.1.** Single workspace/process; connection protocol draft 0.1. NeMo requires a compatible external check server. See [future scope](docs/ROADMAP.md) for planned additions.
+**Current release: 1.2.** Single workspace/server process; connection protocol draft 0.1. NeMo requires a compatible external check server. See [future scope](docs/ROADMAP.md) for planned additions.

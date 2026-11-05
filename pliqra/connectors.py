@@ -1,10 +1,58 @@
 import json
+import math
 import hashlib
 
 import httpx
 from fastapi import HTTPException
 
 from .security import endpoint_url
+
+MAX_RESPONSE_BYTES = 16_000_000
+MAX_STREAM_LINE_BYTES = 1_000_000
+
+
+def strict_json(value):
+    def invalid_constant(_):
+        raise ValueError('Non-finite JSON number')
+    def finite_float(number):
+        result=float(number)
+        if not math.isfinite(result):
+            raise ValueError('Non-finite JSON number')
+        return result
+    try:
+        return json.loads(value, parse_constant=invalid_constant, parse_float=finite_float)
+    except RecursionError:
+        raise ValueError('Endpoint JSON nesting exceeded the parser limit') from None
+
+
+async def response_json(response, limit=MAX_RESPONSE_BYTES):
+    chunks, size = [], 0
+    async for chunk in response.aiter_bytes(chunk_size=65536):
+        size += len(chunk)
+        if size > limit:
+            raise ValueError('Endpoint response exceeded its size limit')
+        chunks.append(chunk)
+    return strict_json(b''.join(chunks))
+
+
+async def bounded_lines(response):
+    pending, size = bytearray(), 0
+    # Preserve transport chunks: chunk_size buffering would delay the first SSE token.
+    async for chunk in response.aiter_bytes():
+        size += len(chunk)
+        if size > MAX_RESPONSE_BYTES:
+            raise ValueError('Stream exceeded its size limit')
+        pending.extend(chunk)
+        while (ending := pending.find(b'\n')) >= 0:
+            if ending > MAX_STREAM_LINE_BYTES:
+                raise ValueError('Stream frame exceeded its size limit')
+            line = bytes(pending[:ending]).removesuffix(b'\r')
+            del pending[:ending+1]
+            yield line.decode('utf-8')
+        if len(pending) > MAX_STREAM_LINE_BYTES:
+            raise ValueError('Stream frame exceeded its size limit')
+    if pending:
+        yield bytes(pending).removesuffix(b'\r').decode('utf-8')
 
 
 def headers(secret, name="Authorization", prefix="Bearer"):
@@ -28,16 +76,14 @@ async def discover(client, endpoint, secret="", provider="auto", auth_header="Au
     errors = []
     for kind, url in candidates:
         try:
-            response = await client.get(url, headers=headers(secret, auth_header, auth_prefix), timeout=8)
-            if response.status_code in (401, 403):
-                errors.append("Endpoint rejected the credentials")
-                continue
-            if response.status_code != 200:
-                errors.append(f"Discovery returned HTTP {response.status_code}")
-                continue
-            if len(response.content) > 2_000_000:
-                continue
-            payload = response.json()
+            async with client.stream('GET', url, headers=headers(secret, auth_header, auth_prefix), timeout=8) as response:
+                if response.status_code in (401, 403):
+                    errors.append("Endpoint rejected the credentials")
+                    continue
+                if response.status_code != 200:
+                    errors.append(f"Discovery returned HTTP {response.status_code}")
+                    continue
+                payload = await response_json(response, 2_000_000)
             entries = payload.get("data" if kind == "openai" else "models")
             if not isinstance(entries, list):
                 continue

@@ -195,11 +195,12 @@ def mount(app):
         request = {'messages': [{'role': role, 'content': body.text}]}
         test_id=uid('railtest_')
         # Observe records the verdict but never blocks this explicit operator test.
-        await engine.check(None, body.stage, request, app.state.gateway.client,event_id=test_id,
-                           response={'choices': [{'message': request['messages'][0]}]},
-                           only={'guardrail_id': record_id, 'stages': [body.stage], 'mode': 'observe', 'on_error': 'block'})
-        store.audit(p['id'], 'guardrail.tested', record_id, {'stage': body.stage})
-        return store.one('SELECT * FROM guardrail_decisions WHERE event_id=?', (test_id,))
+        with app.state.gateway.checking():
+            await app.state.gateway.policies.check(None, body.stage, request, app.state.gateway.client,event_id=test_id,
+                               response={'choices': [{'message': request['messages'][0]}]},
+                               only={'guardrail_id': record_id, 'stages': [body.stage], 'mode': 'observe', 'on_error': 'block'})
+            store.audit(p['id'], 'guardrail.tested', record_id, {'stage': body.stage})
+            return store.one('SELECT * FROM guardrail_decisions WHERE event_id=?', (test_id,))
 
     @app.get('/api/v1/guardrail-decisions', tags=['Guardrails'])
     def decisions(gateway_id: str = '', limit: int = 50, p=Depends(admin)):

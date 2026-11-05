@@ -9,13 +9,13 @@ from typing import Annotated, Literal
 
 import httpx
 from fastapi import HTTPException
-from jsonschema import Draft202012Validator
-from jsonschema.exceptions import SchemaError
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .access import require_project
 from .db import encode, now, uid
 from .security import endpoint_url
+from .inference_schema import map_message_text, requests_tools, INFERENCE_CONTRACT_REVISION
+from .schema_validation import SchemaExecutor, validate_schema_definition
 
 
 class Strict(BaseModel):
@@ -66,17 +66,7 @@ class GuardrailConfig(Strict):
     @model_validator(mode='after')
     def valid_schema(self):
         if self.json_schema is not None:
-            # Remote references must never turn a content check into an outbound fetch.
-            def references(value):
-                if isinstance(value, dict):
-                    return any(k in ('$ref', '$dynamicRef') and not str(v).startswith('#') or references(v) for k, v in value.items())
-                return isinstance(value, list) and any(references(v) for v in value)
-            if references(self.json_schema):
-                raise ValueError('Only local JSON Schema references are supported')
-            try:
-                Draft202012Validator.check_schema(self.json_schema)
-            except SchemaError:
-                raise ValueError('Invalid JSON Schema')
+            validate_schema_definition(self.json_schema)
         return self
 
 
@@ -86,19 +76,10 @@ PII = {
 }
 
 
-def walk_strings(value, transform):
-    if isinstance(value, str):
-        return transform(value)
-    if isinstance(value, list):
-        return [walk_strings(v, transform) for v in value]
-    if isinstance(value, dict):
-        return {k: walk_strings(v, transform) for k, v in value.items()}
-    return value
-
-
 class PolicyEngine:
     def __init__(self, store, vault):
         self.store, self.vault = store, vault
+        self.schemas=SchemaExecutor()
 
     def profile(self, identity):
         row = self.store.one('SELECT * FROM gateway_profiles WHERE id=? OR slug=?', (identity, identity))
@@ -111,7 +92,8 @@ class PolicyEngine:
         for step in profile['config']['guardrails']:
             row = profile['rail_snapshots'].get(step['guardrail_id']) if 'rail_snapshots' in profile else self.store.one('SELECT * FROM guardrails WHERE id=?', (step['guardrail_id'],))
             rails.append({k:row[k] for k in ('id','provider','config','version','enabled')} if row else None)
-        value = {'id': profile['id'], 'version': profile['version'], 'config': profile['config'], 'guardrails': rails}
+        value = {'id': profile['id'], 'version': profile['version'], 'config': profile['config'], 'guardrails': rails,
+                 'contract_revision':INFERENCE_CONTRACT_REVISION}
         return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
     def resolve(self, principal, port=None, explicit=None):
@@ -155,7 +137,7 @@ class PolicyEngine:
             raise HTTPException(422, 'Gateway output token limit exceeded')
         if body.get('n', 1) != 1 or body.get('best_of', 1) != 1:
             raise HTTPException(422, 'Managed gateways require one completion per request')
-        if body.get('tools') and not config['allow_tools']:
+        if requests_tools(body) and not config['allow_tools']:
             raise HTTPException(403, 'Tool calling is disabled by this gateway')
         if not config['allow_vision'] and any(isinstance(m.get('content'), list) and any(
                 part.get('type') in ('image_url', 'input_image') for part in m['content']) for m in body['messages']):
@@ -181,6 +163,7 @@ class PolicyEngine:
             row=profile['rail_snapshots'].get(step['guardrail_id']) if 'rail_snapshots' in profile else self.store.one('SELECT * FROM guardrails WHERE id=?',(step['guardrail_id'],))
             checks.append({**step,**({k:row[k] for k in ('name','provider','version','enabled')} if row else {'enabled':False})})
         return {'id':profile['id'],'name':profile['name'],'version':profile['version'],
+                'contract_revision':INFERENCE_CONTRACT_REVISION,
                 'fingerprint':self.fingerprint(profile),'limits':config['limits'],
                 'max_concurrency':config['max_concurrency'],'max_input_chars':config['max_input_chars'],
                 'max_output_tokens':config['max_output_tokens'],'allow_tools':config['allow_tools'],
@@ -230,7 +213,8 @@ class PolicyEngine:
         if not ledger:
             return
         complete = all(a['input_tokens'] is not None and a['output_tokens'] is not None for a in attempts)
-        tokens = sum((a['input_tokens'] or 0)+(a['output_tokens'] or 0) for a in attempts) if complete else ledger['reservation']
+        known = sum((a['input_tokens'] or 0)+(a['output_tokens'] or 0) for a in attempts)
+        tokens = known if complete else max(known, ledger['reservation'])
         self.store.update('gateway_requests', event_id, {'tokens': tokens, 'status': status})
 
     def buffered(self, profile):
@@ -273,15 +257,20 @@ class PolicyEngine:
         return result
 
     async def evaluate(self, rail, config, stage, messages, body, client):
-        text = encode(messages)
+        texts = []
+        map_message_text(messages, lambda value: texts.append(value) or value)
+        text = '\n'.join(texts)
         if rail['provider'] == 'builtin':
             if config['rule'] == 'json_schema':
                 if stage != 'output':
                     raise ValueError('JSON Schema is an output guardrail')
                 try:
-                    passed = all(Draft202012Validator(config['json_schema']).is_valid(json.loads(m.get('content') or '')) for m in messages)
+                    values=[json.loads(message.get('content') or '') for message in messages]
                 except (ValueError, TypeError):
-                    passed = False
+                    return 'blocked', messages
+                passed=True
+                for value in values:
+                    passed=await self.schemas.validate(config['json_schema'],value,config['timeout_seconds']) and passed
                 return ('passed' if passed else 'blocked'), messages
             patterns = [re.compile(re.escape(v), re.I) for v in config['terms']] if config['rule'] == 'keywords' else [PII[t] for t in config['pii_types']]
             matched = any(p.search(text) for p in patterns)
@@ -293,7 +282,7 @@ class PolicyEngine:
                 for pattern in patterns:
                     value = pattern.sub('[REDACTED]', value)
                 return value
-            return 'redacted', walk_strings(messages, redact)
+            return 'redacted', map_message_text(messages, redact)
         endpoint = endpoint_url(config['endpoint'])
         secret = self.vault.decrypt(rail['secret'])
         headers = {config['auth_header']: ((config['auth_prefix']+' ') if config['auth_prefix'] else '')+secret} if secret else {}

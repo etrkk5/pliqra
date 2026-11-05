@@ -160,3 +160,13 @@ A password-encrypted backup contains a consistent SQLite snapshot and its encryp
 | `examples/reference_server.py` | Independent minimal protocol implementation |
 
 The supported topology is one workspace and one server process per volume. Distributed quotas, multiple replicas and physical tenant isolation are outside this release. See [protocol details](PROTOCOL.md), [validation evidence](RELEASE.md) and [future scope](ROADMAP.md).
+
+## Architecture review and hardened boundaries
+
+Version 1.2 separates the typed inference boundary into [inference_schema.py](../pliqra/inference_schema.py). Unknown or conflicting generation controls fail before model admission. A consistent preparation snapshot is revalidated with current identity/session/access and readiness inside the admission transaction. Round-robin selection and cursor updates occur there too.
+
+Output-checked calls use a controlled response envelope before content checks, preventing unchecked provider/debug/logprobs fields from bypassing redaction. Text transformations preserve protocol metadata. Streaming and discovery are bounded while reading; malformed completions are not verified.
+
+JSON Schema work runs in at most two temporary, deadline-bound workers shared by guardrails and evaluations. These workers do not own the volume or API server. Event/ledger settlement is atomic; uncertain token charges cannot undercut known usage. Cache packets retain the producing deployment. Vault validation covers every encrypted source, and restore checks ciphertext/key consistency before mutation.
+
+See the [technical review](TECHNICAL_REVIEW.md) for reproduced findings and the [inference contract](INFERENCE_API.md) for the supported request/response and upgrade boundary.

@@ -20,7 +20,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, StringConstraints, ValidationError, field_validator
+from pydantic import BaseModel, Field, StringConstraints, ValidationError, field_validator
 from starlette.middleware.sessions import SessionMiddleware
 from itsdangerous import TimestampSigner
 
@@ -30,6 +30,7 @@ from .connectors import discover
 from .db import Store, encode, now, uid
 from .gateway import CAPABILITIES, Gateway, decoded_deployment, decoded_port
 from .security import Vault, digest, endpoint_url, hash_password, verify_password
+from .inference_schema import ChatInput
 
 STATIC = Path(__file__).parent / "static"
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
@@ -155,26 +156,6 @@ class BindingInput(BaseModel):
         return sorted(set(values))
 
 
-class Message(BaseModel):
-    model_config = ConfigDict(extra="allow")
-    role: Literal["system", "developer", "user", "assistant", "tool", "function"]
-    content: str | list[dict] | None = None
-
-
-class ChatInput(BaseModel):
-    model_config = ConfigDict(extra="allow")
-    model: Annotated[str, Field(min_length=1, max_length=256)]
-    messages: Annotated[list[Message], Field(min_length=1, max_length=500)]
-    stream: bool = False
-    max_tokens: Annotated[int | None, Field(ge=1, le=131072)] = None
-    max_completion_tokens: Annotated[int | None, Field(ge=1, le=131072)] = None
-    temperature: Annotated[float | None, Field(ge=0, le=2)] = None
-    n: Literal[1] = 1
-    response_format: dict | None = None
-    tools: list[dict] | None = None
-    pliqra: dict | None = Field(default=None,validation_alias=AliasChoices("pliqra","modelport"))
-
-
 def safe_user(row):
     return {key: row[key] for key in ("id", "email", "name", "role", "issuer", "active", "created")}
 
@@ -246,7 +227,7 @@ def create_app(data_dir=None):
         response.headers["Referrer-Policy"] = "same-origin"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
-        if request.url.path.startswith(("/api/", "/auth/", "/protocol/", "/v1/")):
+        if request.url.path.startswith(("/api/", "/auth/", "/protocol/", "/v1/", "/g/")):
             response.headers["Cache-Control"] = "no-store"
         return response
 
@@ -280,7 +261,7 @@ def create_app(data_dir=None):
             raise HTTPException(401, "Sign in to continue")
         if request.method in ("POST", "PATCH", "PUT", "DELETE") and not secrets.compare_digest(request.headers.get("x-pliqra-csrf", ""), row["csrf"]):
             raise HTTPException(403, "Session verification failed. Refresh and try again.")
-        return {"id": row["id"], "kind": "user", "role": row["role"], "user": row, "csrf": row["csrf"]}
+        return {"id": row["id"], "kind": "user", "role": row["role"], "user": row, "csrf": row["csrf"],"session_hash":digest(token)}
 
     def user(p=Depends(principal)):
         if p["kind"] != "user":

@@ -1,10 +1,10 @@
-# Pliqra 1.1 — validation record
+# Pliqra 1.2 — validation record
 
 Baseline validated locally on 5 November 2026; gateway/guardrail additions validated on 6 November 2026. This record describes observed behavior, not a security certification or a claim of every-provider compatibility.
 
 ## Automated checks
 
-- 51 tests pass on host Python 3.14 and in the Linux/Python 3.13 container.
+- 92 tests pass on host Python 3.14 and in the Linux/Python 3.13 container.
 - Coverage includes OpenAI-compatible/Ollama chat, fragmented Unicode streaming, incomplete streams, cancellation/accounting paths, pre-stream fallback, service fingerprints, revoked/expired/scoped keys, RPM/budget limits, project/team authorization and admin rollups, encrypted optional content/cache/backup, restore, interrupted-restore crash recovery and session invalidation, SCIM lifecycle, signed/tampered/replayed SAML responses, asynchronous evaluations and positive function/structured-output/streaming capability probes.
 - Dependency deprecation warnings remain in Authlib/httpx and the SAML toolkit; no failing assertions are suppressed.
 - The Docker runtime runs as UID/GID 10001, persists a named volume and reports healthy. Its SAML XML signature runtime imports successfully (xmlsec 1.3.18 / libxml2 2.14.6 on the tested Linux ARM64 build).
@@ -29,6 +29,14 @@ The browser run created and cloned gateways with minute/day windows and three si
 
 NeMo configuration fields were exercised without an external call. The decision adapter is validated with controlled fixtures matching the published check-API shape; a real NeMo deployment was not available. No actual provider deployment or security-policy effectiveness is implied by these fixtures. Gateway-managed load/latency was not benchmarked; the earlier load measurement below describes the pre-guardrail baseline.
 
+## Architecture hardening in 1.2
+
+Forty-one regression cases extend the original 51 tests. They cover controlled checked-response envelopes, protocol-safe local text checks, typed/finite request controls and legacy tool permissions, admission-time identity/session/configuration/verified-eligibility checks, bounded discovery/stream reads, malformed completion rejection, isolated schema deadlines and child cleanup, conservative partial-token settlement, atomic event/ledger commits, credential/archive key validation, future-schema rejection, concurrent round-robin, cached-fallback provenance, asynchronous health/restore barriers, named-route no-store and implementation-revision binding invalidation.
+
+The [technical review](TECHNICAL_REVIEW.md) records twelve finding groups, corrections and residual deployment boundaries. The [inference guide](INFERENCE_API.md) documents the deliberately stricter 1.2 compatibility boundary. No new vendor certification or performance claim is made. Existing sample console screenshots describe the same UI workflows; 1.2 acceptance focuses on runtime boundaries and failure cases.
+
+A fresh 1.2 Docker workspace also passed real HTTP checks for version/health, first-administrator setup, anonymous-access rejection, schema-worker pass/block decisions, no-store headers and unsupported-request rejection. The temporary workspace was removed; the existing user workspace was not started or seeded.
+
 ## Independent interoperability
 
 A Python standard-library client, importing no gateway code, passed discovery, binding, completion, streaming and unsupported-capability rejection against:
@@ -50,7 +58,7 @@ These are local end-to-end synthetic measurements, including Docker networking a
 
 ## Supported release boundary
 
-One workspace, one process and one persistent volume. Generic OIDC/SAML/SCIM are implemented and tested with controlled standards fixtures; the intended real identity provider and real LLM endpoint still require their own configuration and acceptance test. Inference is the documented chat-completions subset. PostgreSQL/HA, distributed quotas, provider-native APIs, embeddings/audio, full native Ollama tool adaptation and vendor-specific native safety engines are outside release 1.1. Named gateways and the documented local/NeMo-check/custom-HTTP execution layer are included. The connection protocol remains draft 0.1.
+One workspace, one process and one persistent volume. Generic OIDC/SAML/SCIM are implemented and tested with controlled standards fixtures; the intended real identity provider and real LLM endpoint still require their own configuration and acceptance test. Inference is the documented chat-completions subset. PostgreSQL/HA, distributed quotas, provider-native APIs, embeddings/audio, full native Ollama tool adaptation and vendor-specific native safety engines are outside release 1.2. Named gateways and the documented local/NeMo-check/custom-HTTP execution layer are included. The connection protocol remains draft 0.1.
 
 ## Pliqra rename verification
 

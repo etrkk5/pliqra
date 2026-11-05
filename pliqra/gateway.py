@@ -3,6 +3,8 @@ import hashlib
 import json
 import time
 import threading
+from dataclasses import dataclass
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 
@@ -11,13 +13,22 @@ from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
-from .connectors import ollama_result, sse, upstream_request
+from .connectors import ollama_result, sse, upstream_request, bounded_lines, response_json, strict_json
+from .inference_schema import checked_completion, requests_tools, valid_completion, INFERENCE_CONTRACT_REVISION
 from .db import encode, now, uid
-from .access import service_allowed, require_project
+from .access import service_allowed, require_project, current_principal
 from .policies import PolicyEngine
 
 
 CAPABILITIES = {"chat", "streaming", "tools", "structured_output", "vision"}
+
+
+@dataclass(frozen=True)
+class AdmissionSnapshot:
+    service_fingerprint: str
+    generation: int
+    required: tuple = ()
+    deployments: tuple = ()
 
 
 def decoded_port(row):
@@ -38,7 +49,8 @@ def cost_micros(usage, deployment):
 
 
 def usage_of(data):
-    usage = data.get("usage") or {}
+    usage = data.get("usage") if isinstance(data,dict) else None
+    if not isinstance(usage,dict):return None,None
     values = (usage.get("prompt_tokens", usage.get("input_tokens")), usage.get("completion_tokens", usage.get("output_tokens")))
     return tuple(value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None for value in values)
 
@@ -47,10 +59,23 @@ class Gateway:
     def __init__(self, store, vault, client):
         self.store, self.vault, self.client = store, vault, client
         self.active=0
+        self.checks=0
         self.maintenance=False
         self.state_lock=threading.RLock()
         self.generation=0
         self.policies=PolicyEngine(store,vault)
+
+    @contextmanager
+    def checking(self):
+        with self.state_lock:
+            if self.maintenance:raise HTTPException(503,'Workspace maintenance is in progress')
+            if self.active+self.checks>=self.store.setting('runtime',{}).get('max_concurrency',64):
+                raise HTTPException(429,'Gateway concurrency limit reached')
+            self.checks+=1
+        try:
+            yield
+        finally:
+            with self.state_lock:self.checks-=1
 
     def port(self, name):
         value = self.store.one("SELECT * FROM ports WHERE name=? OR id=?", (name, name))
@@ -77,7 +102,7 @@ class Gateway:
             if eligible:
                 candidates.append(deployment)
         if port["strategy"] == "round_robin" and len(candidates) > 1:
-            count = self.store.one("SELECT COUNT(*) AS n FROM events WHERE port_id=?", (port["id"],))["n"]
+            count = self.store.setting('round_robin:'+port['id'],0)
             offset = count % len(candidates)
             candidates = candidates[offset:] + candidates[:offset]
         return candidates, decisions
@@ -88,30 +113,51 @@ class Gateway:
             row = self.store.one("SELECT d.id,d.model,d.capabilities,d.enabled,d.input_price,d.output_price,d.metadata_hash,c.endpoint,c.provider,c.enabled AS connection_enabled,c.auth_header,c.auth_prefix FROM deployments d JOIN connections c ON c.id=d.connection_id WHERE d.id=?", (record_id,))
             deployments.append(row)
         content = {"name": port["name"], "version": port["version"], "enabled": port["enabled"], "requirements": port["requirements"], "strategy": port["strategy"], "log_content":port.get("log_content",0),"project_id":port.get("project_id"),"verified_only":port.get("verified_only",0),"cache_ttl":port.get("cache_ttl",0),"max_input_chars":port.get("max_input_chars",200000),"max_output_tokens":port.get("max_output_tokens",32768),"deployments": deployments}
+        content['contract_revision']=INFERENCE_CONTRACT_REVISION
         return hashlib.sha256(json.dumps(content,sort_keys=True,separators=(",",":")).encode()).hexdigest()
 
     def manifest(self, port):
         candidates, decisions = self.candidates(port)
-        return {"protocol": "pliqra/0.1-draft", "id": port["id"], "name": port["name"], "description": port["description"], "version": port["version"], "fingerprint": self.fingerprint(port), "requirements": port["requirements"], "invocation": {"interface": "openai-chat-completions", "path": "/v1/chat/completions", "model": port["name"]}, "deployments": [{"model": item["model"], "capabilities": item["capabilities"], "verified": item["verified"], "evidence": "Declared capabilities; verified lists independently tested capabilities"} for item in candidates], "readiness": "ready" if candidates else "unavailable", "decisions": decisions}
+        return {"protocol": "pliqra/0.1-draft", "contract_revision":INFERENCE_CONTRACT_REVISION, "id": port["id"], "name": port["name"], "description": port["description"], "version": port["version"], "fingerprint": self.fingerprint(port), "requirements": port["requirements"], "invocation": {"interface": "openai-chat-completions", "path": "/v1/chat/completions", "model": port["name"]}, "deployments": [{"model": item["model"], "capabilities": item["capabilities"], "verified": item["verified"], "evidence": "Declared capabilities; verified lists independently tested capabilities"} for item in candidates], "readiness": "ready" if candidates else "unavailable", "decisions": decisions}
 
     def authorize_port(self, principal, port):
         if not service_allowed(self.store,principal,port):
             raise HTTPException(403,"You are not permitted to use this AI service")
         self.policies.resolve(principal,port)
 
-    def begin(self, principal, port, deployment, body, decisions, reservation_prices=None, kind='inference', attempt_limit=1, policy=None, delivery=None):
+    def begin(self, principal, port, deployment, body, decisions, reservation_prices=None, kind='inference', attempt_limit=1, policy=None, delivery=None, admission=None,candidates=None):
         event_id, started = uid('req_'), now()
-        key = principal.get('key')
-        context=body.get('pliqra') or {}
-        if not isinstance(context,dict):raise HTTPException(422,'pliqra must be an object')
-        project_id=key['project_id'] if key else port.get('project_id') or context.get('project_id')
-        team_id=key.get('team_id') if key else context.get('team_id')
-        if project_id and not key:require_project(self.store,principal,project_id)
-        if team_id:
-            if not project_id or not self.store.one('SELECT team_id FROM team_projects WHERE team_id=? AND project_id=?',(team_id,project_id)):raise HTTPException(403,'Team is not assigned to this project')
-            if not key and principal['role']!='admin' and not self.store.one('SELECT user_id FROM team_members WHERE team_id=? AND user_id=?',(team_id,principal['id'])):raise HTTPException(403,'You are not a member of this team')
-        reserve=0
         with self.store.transaction():
+            principal=current_principal(self.store,principal)
+            if admission:
+                latest=self.port(port['id']) if kind!='probe' else port
+                if admission.generation!=self.generation or admission.service_fingerprint!=self.fingerprint(latest):
+                    raise HTTPException(409,'Service configuration changed during admission; retry with the current contract')
+                if kind=='probe':
+                    if principal['role']!='admin':raise HTTPException(403,'Administrator access is required for a probe')
+                else:
+                    self.authorize_port(principal,latest)
+                    effective={**latest,'verified_only':latest.get('verified_only') or bool(policy and policy['config']['require_verified'])}
+                    eligible,_=self.candidates(effective,admission.required)
+                    if not set(admission.deployments).issubset({d['id'] for d in eligible}):
+                        raise HTTPException(503,'Deployment readiness changed during admission; retry when eligible models are available')
+                    if candidates is not None and port['strategy']=='round_robin':
+                        order={d['id']:i for i,d in enumerate(eligible)}
+                        candidates.sort(key=lambda d:order[d['id']])
+                        deployment=candidates[0]
+                current_policy=self.policies.resolve(principal,latest,policy['id'] if policy else None)
+                if (current_policy['id'] if current_policy else None)!=(policy['id'] if policy else None):
+                    raise HTTPException(409,'Gateway assignment changed during admission')
+            key = principal.get('key')
+            context=body.get('pliqra') or {}
+            if not isinstance(context,dict):raise HTTPException(422,'pliqra must be an object')
+            project_id=key['project_id'] if key else port.get('project_id') or context.get('project_id')
+            team_id=key.get('team_id') if key else context.get('team_id')
+            if project_id and not key:require_project(self.store,principal,project_id)
+            if team_id:
+                if not project_id or not self.store.one('SELECT team_id FROM team_projects WHERE team_id=? AND project_id=?',(team_id,project_id)):raise HTTPException(403,'Team is not assigned to this project')
+                if not key and principal['role']!='admin' and not self.store.one('SELECT user_id FROM team_members WHERE team_id=? AND user_id=?',(team_id,principal['id'])):raise HTTPException(403,'You are not a member of this team')
+            reserve=0
             if key:
                 current=self.store.one('SELECT * FROM api_keys WHERE id=?',(key['id'],))
                 if not current or not current['active'] or (current['expires'] and current['expires']<=started):raise HTTPException(401,'Access key has been revoked or expired')
@@ -131,6 +177,9 @@ class Gateway:
                     if spent+reserve>project['monthly_budget']*1_000_000:raise HTTPException(402,"Project budget cannot cover this request's estimated reservation")
             self.policies.admit(policy,event_id,principal,port,body,project_id,team_id,attempt_limit)
             self.store.insert('events',{'id':event_id,'started':started,'principal':principal['id'],'actor_user_id':key.get('created_by') if key else principal['id'],'project_id':project_id,'team_id':team_id,'key_id':key['id'] if key else None,'port_id':port['id'],'port_name':port['name'],'port_version':port['version'],'deployment_id':deployment['id'],'model':deployment['model'],'connection_name':deployment['connection_name'],'status':'pending','stream':int(bool(body.get('stream'))),'reserved_micros':reserve,'decisions':encode(decisions),'request_kind':kind,'price_snapshot':encode({'input_price':deployment['input_price'],'output_price':deployment['output_price']}),'gateway_id':policy['id'] if policy else None,'gateway_name':policy['name'] if policy else None,'gateway_fingerprint':policy['fingerprint'] if policy else None,'delivery':delivery})
+            if candidates is not None and port['strategy']=='round_robin':
+                cursor='round_robin:'+port['id']
+                self.store.set_setting(cursor,self.store.setting(cursor,0)+1)
         if port.get('log_content') and kind=='inference':
             raw=encode(body)
             content={'request':body} if len(raw.encode('utf-8'))<=64000 else {'request_excerpt':raw.encode('utf-8')[:64000].decode('utf-8',errors='ignore'),'request_truncated':True}
@@ -170,8 +219,9 @@ class Gateway:
         if not attempts:
             fields.update(input_tokens=0,output_tokens=0,usage_source='not_invoked',cost_micros=0,reserved_micros=0,
                           deployment_id=None,model=None,connection_name=None)
-        self.store.update('events',event_id,fields)
-        self.policies.settle(event_id,status,attempts)
+        with self.store.transaction():
+            self.store.update('events',event_id,fields)
+            self.policies.settle(event_id,status,attempts)
 
     def rejected(self,body,principal,error,gateway_id=None):
         key=principal.get('key')
@@ -187,12 +237,18 @@ class Gateway:
             raise
 
     async def route(self,body,principal,binding=None,request_kind='inference',gateway_id=None):
+        with self.store.lock:
+            body,port,candidates,decisions,policy,admission=self.prepare(body,principal,binding,request_kind,gateway_id)
+        return await self.execute(body,principal,port,candidates,decisions,request_kind,policy,admission=admission)
+
+    def prepare(self,body,principal,binding=None,request_kind='inference',gateway_id=None):
         if binding and (binding['principal']!=principal['id'] or binding['expires']<=now()):
             raise HTTPException(403,'Binding belongs to another identity or has expired')
         port=self.port(binding['port_id'] if binding else body['model'])
         self.authorize_port(principal,port)
+        service_fingerprint=self.fingerprint(port)
         policy=self.policies.resolve(principal,port,gateway_id or (binding or {}).get('gateway_id'))
-        if binding and (body['model'] not in (port['id'],port['name']) or binding['fingerprint']!=self.fingerprint(port)):
+        if binding and (body['model'] not in (port['id'],port['name']) or binding['fingerprint']!=service_fingerprint):
             raise HTTPException(409,'Service contract changed. Discover and bind again; no silent model substitution was performed.')
         if binding and (binding.get('gateway_id')!=(policy['id'] if policy else None) or binding.get('gateway_fingerprint')!=(policy['fingerprint'] if policy else None)):
             raise HTTPException(409,'Gateway policy or guardrail configuration changed. Discover and bind again.')
@@ -208,7 +264,7 @@ class Gateway:
             port={**port,'verified_only':True}
         required={'chat'}
         if body.get('stream') and not self.policies.buffered(policy):required.add('streaming')
-        if body.get('tools'):required.add('tools')
+        if requests_tools(body):required.add('tools')
         if body.get('response_format',{}).get('type') in ('json_object','json_schema'):required.add('structured_output')
         for message in body['messages']:
             if isinstance(message.get('content'),list) and any(part.get('type') in ('image_url','input_image') for part in message['content'] if isinstance(part,dict)):required.add('vision')
@@ -216,12 +272,15 @@ class Gateway:
             required.update(json.loads(binding['requirements']))
         candidates,decisions=self.candidates(port,required)
         if not candidates:raise HTTPException(422,{'message':'No deployment satisfies the required capabilities','decisions':decisions})
-        return await self.execute(body,principal,port,candidates,decisions,request_kind,policy)
+        return body,port,candidates,decisions,policy,AdmissionSnapshot(service_fingerprint,self.generation,tuple(sorted(required)),tuple(d['id'] for d in candidates))
 
-    async def execute(self,body,principal,port,candidates,decisions,kind='inference',policy=None):
+    async def execute(self,body,principal,port,candidates,decisions,kind='inference',policy=None,admission=None):
+        if admission is None:
+            with self.store.lock:
+                admission=AdmissionSnapshot(self.fingerprint(port),self.generation)
         with self.state_lock:
             if self.maintenance:raise HTTPException(503,'Workspace maintenance is in progress')
-            if self.active>=self.store.setting('runtime',{}).get('max_concurrency',64):raise HTTPException(429,'Gateway concurrency limit reached')
+            if self.active+self.checks>=self.store.setting('runtime',{}).get('max_concurrency',64):raise HTTPException(429,'Gateway concurrency limit reached')
             self.active+=1
         released=False
         def release():
@@ -237,19 +296,25 @@ class Gateway:
         buffered=bool(body.get('stream') and self.policies.buffered(policy))
         delivery='guarded_buffer' if buffered else 'live_stream' if body.get('stream') else 'json'
         try:
-            if not policy and port.get('cache_ttl',0)>0 and not body.get('stream') and not body.get('tools') and kind=='inference':
+            if not policy and port.get('cache_ttl',0)>0 and not body.get('stream') and not requests_tools(body) and kind=='inference':
                 cache_id=hashlib.sha256((principal['id']+self.fingerprint(port)+json.dumps(body,sort_keys=True)).encode()).hexdigest()
                 cached=self.store.one('SELECT payload FROM cache_entries WHERE id=? AND expires>?',(cache_id,now()))
                 if cached:
-                    event_id,_=self.begin(principal,port,chosen,body,decisions,{'input_price':0,'output_price':0},kind)
-                    data=json.loads(self.vault.decrypt(cached['payload']))
+                    packet=json.loads(self.vault.decrypt(cached['payload']))
+                    cached_deployment=next((d for d in candidates if d['id']==packet.get('deployment_id')),None)
+                    if packet.get('format')!='pliqra/cache/1' or not cached_deployment:cached=None
+                if cached:
+                    chosen=cached_deployment
+                    event_id,_=self.begin(principal,port,chosen,body,decisions,{'input_price':0,'output_price':0},kind,admission=admission)
+                    data=valid_completion(packet['response'])
                     data['id']=event_id
                     data['pliqra']={'cache_hit':True,'billable_tokens':0}
                     self.capture_response(event_id,data)
                     self.store.update('events',event_id,{'status':'success','finished':now(),'latency_ms':(time.perf_counter()-started)*1000,'usage_source':'cache','input_tokens':0,'output_tokens':0,'cost_micros':0,'cache_hit':1,'reserved_micros':0,'decisions':encode([{'selected':True,'reason':'Encrypted exact-response cache; no upstream call was made'}])})
                     return JSONResponse(data,headers={'X-Request-ID':event_id,'X-Pliqra-Model':chosen['model'],'X-Pliqra-Cache':'HIT'})
             prices={field:max(item[field] for item in candidates) if all(item[field] is not None for item in candidates) else None for field in ('input_price','output_price')}
-            event_id,_=self.begin(principal,port,chosen,body,decisions,prices,kind,len(candidates),policy,delivery)
+            event_id,_=self.begin(principal,port,chosen,body,decisions,prices,kind,len(candidates),policy,delivery,admission,candidates)
+            chosen=candidates[0]
             if policy:body=await self.policies.check(policy,'input',body,self.client,event_id)
             upstream_body={**body,'stream':False} if buffered else body
             attempts=[]
@@ -297,23 +362,19 @@ class Gateway:
                     finally:release()
                 streaming=True
                 return StreamingResponse(iterator(),media_type='text/event-stream',headers={'X-Request-ID':event_id,'X-Pliqra-Model':chosen['model'],'X-Pliqra-Delivery':delivery,**({'X-Pliqra-Gateway':policy['id']} if policy else {}),'Cache-Control':'no-cache','X-Accel-Buffering':'no'},background=BackgroundTask(release))
-            chunks=[];size=0
-            async for chunk in response.aiter_bytes():
-                size+=len(chunk)
-                if size>16_000_000:raise ValueError('Response exceeded 16 MB')
-                chunks.append(chunk)
+            data=await response_json(response)
             await response.aclose()
-            data=json.loads(b''.join(chunks))
             if chosen['provider']=='ollama':data=ollama_result(data,event_id,chosen['model'])
-            if not isinstance(data,dict) or not isinstance(data.get('choices'),list) or not data['choices']:raise ValueError('Invalid chat completion')
-            if policy and len(data['choices'])!=1:raise ValueError('Managed gateway expected one completion')
+            valid_completion(data)
             self.finish_attempt(attempt_id,chosen,'success',data,200)
+            if self.policies.buffered(policy):data=checked_completion(data,event_id,chosen['model'])
             if policy:data=await self.policies.check(policy,'output',body,self.client,event_id,response=data)
             self.capture_response(event_id,data)
             self.finish(event_id,started,chosen,'success',data,(time.perf_counter()-started)*1000 if buffered else None)
             self.mark_verified(chosen,'chat')
             if cache_id:
-                self.store.run('INSERT INTO cache_entries VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,expires=excluded.expires',(cache_id,port['id'],self.vault.encrypt(encode(data)),now()+port['cache_ttl']))
+                packet={'format':'pliqra/cache/1','deployment_id':chosen['id'],'response':data}
+                self.store.run('INSERT INTO cache_entries VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,expires=excluded.expires',(cache_id,port['id'],self.vault.encrypt(encode(packet)),now()+port['cache_ttl']))
             headers={'X-Request-ID':event_id,'X-Pliqra-Model':chosen['model'],'X-Pliqra-Cache':'MISS','X-Pliqra-Delivery':delivery}
             if policy:headers['X-Pliqra-Gateway']=policy['id']
             if buffered:
@@ -338,7 +399,7 @@ class Gateway:
             if event_id:self.finish(event_id,started,chosen,'cancelled',error='Client disconnected; upstream cancellation requested')
             if response:await response.aclose()
             raise
-        except (httpx.HTTPError,ValueError,TypeError,KeyError):
+        except (httpx.HTTPError,ValueError,TypeError,KeyError,AttributeError):
             if response:await response.aclose()
             if event_id:self.finish(event_id,started,chosen,'error',error='Endpoint returned an unreadable or incomplete response')
             raise HTTPException(502,{'message':'Endpoint returned an unreadable or incomplete response','request_id':event_id})
@@ -357,13 +418,14 @@ class Gateway:
         captured=[];capture_size=0
         capture=bool(self.store.one("SELECT id FROM event_content WHERE id=?",(event_id,)))
         try:
-            async for line in response.aiter_lines():
+            async for line in bounded_lines(response):
                 if capture and capture_size<64000:
                     captured.append(line.encode('utf-8')[:max(0,63999-capture_size)].decode('utf-8',errors='ignore'));capture_size+=len(line.encode('utf-8'))+1
                 if not line.strip():
                     continue
                 if deployment["provider"] == "ollama":
-                    obj = json.loads(line)
+                    obj = strict_json(line)
+                    if not isinstance(obj,dict):raise ValueError('Invalid stream object')
                     if obj.get("error"):
                         raise ValueError("Upstream reported a streaming error")
                     message = obj.get("message", {})
@@ -392,7 +454,8 @@ class Gateway:
                         terminal = True
                         yield "data: [DONE]\n\n"
                         break
-                    obj = json.loads(payload)
+                    obj = strict_json(payload)
+                    if not isinstance(obj,dict):raise ValueError('Invalid stream object')
                     if obj.get("error"):
                         raise ValueError("Upstream reported a streaming error")
                     if obj.get("usage"):
@@ -406,7 +469,7 @@ class Gateway:
         except asyncio.CancelledError:
             self.finish(event_id, started, deployment, "cancelled", usage, ttft, "Client disconnected; upstream cancellation requested")
             raise
-        except (httpx.HTTPError, ValueError, TypeError):
+        except (httpx.HTTPError, ValueError, TypeError, KeyError, AttributeError):
             error = "Upstream stream failed; no fallback was attempted after streaming started"
             yield sse({"error": {"message": error, "request_id": event_id, "type": "upstream_stream_error"}})
         finally:

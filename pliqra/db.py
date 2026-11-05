@@ -9,6 +9,8 @@ import shutil
 from contextlib import contextmanager
 from pathlib import Path
 
+SCHEMA_VERSION = 3
+
 
 def uid(prefix=""):
     return prefix + uuid.uuid4().hex[:20]
@@ -63,6 +65,10 @@ class Store:
         self.lock = threading.RLock()
         self.conn = sqlite3.connect(directory / "pliqra.sqlite3", check_same_thread=False, isolation_level=None)
         self.conn.row_factory = sqlite3.Row
+        if self.conn.execute('PRAGMA user_version').fetchone()[0] > SCHEMA_VERSION:
+            self.conn.close()
+            self.lease.close()
+            raise RuntimeError('This workspace was created by a newer Pliqra version; use a compatible release or restore its pre-upgrade backup.')
         self.conn.executescript("""
         PRAGMA journal_mode=WAL;
         PRAGMA foreign_keys=ON;

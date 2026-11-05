@@ -5,6 +5,7 @@ import hmac
 import os
 import secrets
 import sqlite3
+import json
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -31,6 +32,27 @@ def verify_password(password, stored):
         return False
 
 
+def encrypted_values(connection):
+    """Stream every registered encrypted source, including optional older-schema tables."""
+    tables={r[0] for r in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    for table,column in [('connections','secret'),('identity_providers','secret'),('guardrails','secret'),
+                         ('cache_entries','payload'),('event_content','payload')]:
+        if table in tables:
+            for row in connection.execute(f"SELECT {column} FROM {table} WHERE {column} IS NOT NULL AND {column}!=''"):
+                yield row[0]
+    if 'identity_providers' in tables:
+        for row in connection.execute('SELECT config FROM identity_providers'):
+            value=json.loads(row[0]).get('sp_private_key')
+            if value:
+                yield value
+
+
+def validate_encryption(connection, key):
+    cipher=Fernet(key)
+    for value in encrypted_values(connection):
+        cipher.decrypt(value.encode())
+
+
 class Vault:
     def __init__(self, directory: Path):
         key = env("PLIQRA_ENCRYPTION_KEY")
@@ -41,13 +63,7 @@ class Vault:
                 if database.exists():
                     connection=sqlite3.connect(database)
                     try:
-                        stored=connection.execute("SELECT secret FROM connections WHERE secret IS NOT NULL AND secret!='' UNION ALL SELECT secret FROM identity_providers WHERE secret!='' LIMIT 1").fetchone()
-                        if not stored:
-                            stored=connection.execute("SELECT config FROM identity_providers WHERE config LIKE '%sp_private_key%' LIMIT 1").fetchone()
-                        if not stored:
-                            stored=connection.execute('SELECT payload FROM cache_entries LIMIT 1').fetchone()
-                        if not stored:
-                            stored=connection.execute('SELECT payload FROM event_content LIMIT 1').fetchone()
+                        stored=next(encrypted_values(connection),None)
                     finally:connection.close()
                     if stored:raise RuntimeError('The encryption key is missing. Restore the original encryption.key or an encrypted backup.')
                 fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -62,14 +78,7 @@ class Vault:
         if database.exists():
             connection=sqlite3.connect(database)
             try:
-                values=[r[0] for r in connection.execute("SELECT secret FROM connections WHERE secret IS NOT NULL AND secret!='' UNION ALL SELECT secret FROM identity_providers WHERE secret!=''").fetchall()]
-                import json
-                for row in connection.execute('SELECT config FROM identity_providers'):
-                    candidate=json.loads(row[0]).get('sp_private_key')
-                    if candidate:values.append(candidate)
-                values.extend(row[0] for row in connection.execute('SELECT payload FROM cache_entries'))
-                values.extend(row[0] for row in connection.execute('SELECT payload FROM event_content'))
-                for value in values:self.fernet.decrypt(value.encode())
+                validate_encryption(connection,raw_key)
             except Exception as exc:
                 raise RuntimeError('The encryption key does not match stored credentials. Restore the original key or encrypted backup.') from exc
             finally:connection.close()

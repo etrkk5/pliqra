@@ -2,6 +2,25 @@
 import json
 
 from fastapi import HTTPException
+from .db import now
+
+
+def current_principal(store, principal):
+    """Revalidate lifecycle at admission, after the HTTP authentication snapshot."""
+    if principal['kind'] == 'key':
+        key=store.one('SELECT * FROM api_keys WHERE id=?',(principal['id'],))
+        if not key or not key['active'] or key['expires'] and key['expires']<=now():
+            raise HTTPException(401,'Access key has been revoked or expired')
+        return {**principal,'key':key}
+    account=store.one("SELECT u.* FROM users u WHERE u.id=? AND u.active=1 AND "
+                      "(u.issuer='local' OR EXISTS(SELECT 1 FROM identity_providers i WHERE i.id=u.issuer AND i.active=1))",(principal['id'],))
+    if not account:
+        raise HTTPException(401,'Account is no longer active')
+    session_hash=principal.get('session_hash')
+    if session_hash and not store.one('SELECT 1 FROM sessions WHERE token_hash=? AND user_id=? AND expires>?',
+                                      (session_hash,principal['id'],now())):
+        raise HTTPException(401,'Session has been revoked or expired')
+    return {**principal,'role':account['role'],'user':account}
 
 
 def project_ids(store, principal, management=False):

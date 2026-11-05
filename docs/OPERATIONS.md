@@ -4,6 +4,14 @@
 
 Configuration, persistent data, recovery and release boundaries for a self-hosted workspace.
 
+## Upgrade from 1.1 to 1.2
+
+Take a backup and stop active inference, evaluations and explicit provider checks before replacing the image. Keep the existing data volume and encryption key.
+
+The workspace remains schema 3. Version 1.2 rejects unsupported/ambiguous inference controls and adds its implementation revision to contract fingerprints: existing bindings require explicit reconnection. Cache entries are warmed again with accurate producing-deployment metadata. See [the inference compatibility guide](INFERENCE_API.md) and [technical review](TECHNICAL_REVIEW.md).
+
+Future database schemas are rejected instead of being silently downgraded. Startup and restore validate every registered encrypted source, including guardrail credentials. Keep off-device encrypted backups; the local recovery marker protects interrupted restore operations, not every storage/power-loss scenario.
+
 ## HTTPS and storage
 
 Persist the whole `/data` volume. It contains SQLite/WAL data and `encryption.key`; neither alone is a complete recovery copy. Provider secrets, SAML private keys, optional captured content and cached responses use authenticated encryption. Keys and sessions are stored as hashes; passwords use salted scrypt. Startup refuses a missing/mismatched encryption key and a second process sharing the same volume.
@@ -60,7 +68,7 @@ docker run -d --name pliqra \
   -p 127.0.0.1:8088:8080 \
   -v modelport-data:/data \
   --add-host host.docker.internal:host-gateway \
-  --restart unless-stopped pliqra:1.1.0
+  --restart unless-stopped pliqra:1.2.0
 ```
 
 The volume name is an existing storage reference, not the product name. Do not run the old and new processes on the same volume simultaneously. Restore the pre-upgrade backup before returning to the old build.

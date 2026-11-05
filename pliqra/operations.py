@@ -21,7 +21,7 @@ from .access import project_ids, require_project, service_allowed
 from .connectors import discover, headers
 from .db import encode, now, uid
 from .gateway import decoded_port
-from .security import digest, endpoint_url, hash_password, verify_password
+from .security import digest, endpoint_url, hash_password, verify_password, validate_encryption
 
 
 class ConnectionPatch(BaseModel):
@@ -124,7 +124,11 @@ def restore_bytes(store, vault, archive, password):
                 raise ValueError()
             if not source.execute("SELECT id FROM users WHERE role='admin' AND issuer='local' AND active=1").fetchone():
                 raise ValueError()
-        except (sqlite3.Error, ValueError):
+            if source.execute("PRAGMA foreign_key_check").fetchone():
+                raise ValueError()
+            validate_encryption(source,replacement)
+        except (sqlite3.Error, ValueError, TypeError, AttributeError, InvalidToken):
+            if 'source' in locals():source.close()
             raise HTTPException(422, "Backup database failed validation or has no active local administrator")
         with store.lock:
             # Keep a consistent local recovery snapshot until the operation has completed.
@@ -175,23 +179,33 @@ async def check_connection_health(app, record_id, actor="system"):
         raise HTTPException(404, "Connection not found")
     if not row["enabled"]:
         raise HTTPException(409, "Connection is disabled")
+    def ensure_current():
+        current=store.one('SELECT * FROM connections WHERE id=?',(record_id,))
+        fields=('endpoint','provider','secret','manual_model','auth_header','auth_prefix','enabled')
+        if generation!=app.state.gateway.generation or app.state.gateway.maintenance or not current or any(current[k]!=row[k] for k in fields):
+            raise HTTPException(409,'Workspace or connection changed during the health check; retry')
     try:
         found = await discover(app.state.client, row["endpoint"], vault.decrypt(row["secret"]), row["provider"], row["auth_header"], row["auth_prefix"])
     except HTTPException:
         if row["manual_model"]:
             try:
-                response = await app.state.client.get(row["endpoint"], headers=headers(vault.decrypt(row["secret"]), row["auth_header"], row["auth_prefix"]), timeout=5)
-                if response.status_code < 500 and response.status_code not in (401,403):
-                    store.update("connections", record_id, {"status":"reachable", "last_checked":now(), "last_error":"HTTP endpoint reachable; model-list discovery unavailable"})
-                    return {"provider":row["provider"],"models":[],"status":"reachable","inference_verified":False}
+                async with app.state.client.stream('GET',row["endpoint"], headers=headers(vault.decrypt(row["secret"]), row["auth_header"], row["auth_prefix"]), timeout=5) as response:
+                    if response.status_code < 500 and response.status_code not in (401,403):
+                        with store.transaction():
+                            ensure_current()
+                            store.update("connections", record_id, {"status":"reachable", "last_checked":now(), "last_error":"HTTP endpoint reachable; model-list discovery unavailable"})
+                        return {"provider":row["provider"],"models":[],"status":"reachable","inference_verified":False}
             except httpx.HTTPError:
                 pass
-        store.update("connections", record_id, {"status":"unreachable", "last_checked":now(), "last_error":"Endpoint or credentials failed the health check"})
+        with store.transaction():
+            ensure_current()
+            store.update("connections", record_id, {"status":"unreachable", "last_checked":now(), "last_error":"Endpoint or credentials failed the health check"})
         raise HTTPException(502, "Endpoint or credentials failed the health check")
     if generation!=app.state.gateway.generation or app.state.gateway.maintenance:
         raise HTTPException(409,'Workspace changed during the health check; retry')
     changed = []
     with store.transaction():
+        ensure_current()
         seen = set()
         for item in found["models"]:
             seen.add(item["model"])
@@ -431,7 +445,7 @@ def mount(app):
         try:archive=base64.b64decode(body.archive,validate=True)
         except ValueError:raise HTTPException(422,"Invalid backup encoding")
         with app.state.gateway.state_lock:
-            if app.state.gateway.active or app.state.gateway.maintenance or store.one("SELECT id FROM evaluations WHERE status IN ('queued','running') LIMIT 1"):raise HTTPException(409,"Stop active requests and evaluations before restoring")
+            if app.state.gateway.active or app.state.gateway.checks or app.state.gateway.maintenance or store.one("SELECT id FROM evaluations WHERE status IN ('queued','running') LIMIT 1"):raise HTTPException(409,"Stop active requests, provider checks and evaluations before restoring")
             app.state.gateway.maintenance=True
         try:
             result=restore_bytes(store,vault,archive,body.password)

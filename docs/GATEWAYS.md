@@ -101,6 +101,8 @@ Local pattern matching is not a general DLP engine, semantic safety guarantee or
 
 Gateway-managed calls bypass the existing exact response cache so checks and usage policies always run. Existing direct service caching remains available.
 
+Version 1.2 hardens the [inference request/response boundary](INFERENCE_API.md): unknown generation controls are rejected, legacy tool requests share tool permissions, and output checks receive a controlled envelope. Provider debug/logprobs and arbitrary metadata are excluded from checked delivery. Local phrase checks do not match or rewrite protocol role/type fields. JSON Schema execution uses shared, bounded temporary workers with deadlines instead of running unbounded work on the server loop.
+
 ### NeMo compatibility
 
 Configure the full endpoint, for example **http://nemo-guardrails:8000/v1/checks**, and its server-side configuration ID. Authentication header/prefix, encrypted key and deadline are configurable.

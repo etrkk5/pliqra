@@ -4,11 +4,11 @@ from typing import Annotated, Literal
 
 from fastapi import Depends, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
-from jsonschema import Draft202012Validator
 from pydantic import BaseModel, Field, field_validator
 
 from .db import encode, now, uid
 from .gateway import decoded_deployment
+from .schema_validation import validate_schema_definition
 
 
 class Case(BaseModel):
@@ -22,19 +22,7 @@ class Case(BaseModel):
     @classmethod
     def schema(cls,value):
         if value is None:return value
-        if len(encode(value))>20000:raise ValueError('Schema exceeds 20 KB')
-        def walk(node,depth=0):
-            if depth>40:raise ValueError('Schema nesting exceeds 40 levels')
-            if isinstance(node,dict):
-                for key,item in node.items():
-                    if key in ('$ref','$dynamicRef') and (not isinstance(item,str) or not item.startswith('#')):raise ValueError('Only local schema references are permitted')
-                    walk(item,depth+1)
-            elif isinstance(node,list):
-                for item in node:walk(item,depth+1)
-        walk(value)
-        try:Draft202012Validator.check_schema(value)
-        except Exception:raise ValueError('Invalid JSON Schema')
-        return value
+        return validate_schema_definition(value)
 
 
 class Dataset(BaseModel):
@@ -77,15 +65,15 @@ def mount(app):
         store.audit(p['id'],'evaluation_set.updated',record_id,{'case_count':len(body.cases)})
         return {'ok':True}
 
-    def result_checks(case,text,event):
+    async def result_checks(case,text,event):
         checks=[{'name':'Valid completion','passed':True}]
         if case.get('contains'):checks.append({'name':'Expected text','passed':case['contains'].casefold() in text.casefold()})
         if case.get('json_schema') is not None:
             passed=False
             try:
                 value=json.loads(text)
-                passed=Draft202012Validator(case['json_schema']).is_valid(value)
-            except (ValueError,RecursionError):pass
+                passed=await app.state.gateway.policies.schemas.validate(case['json_schema'],value)
+            except (ValueError,RecursionError,TimeoutError):pass
             checks.append({'name':'JSON Schema','passed':passed})
         if case.get('max_latency_ms'):checks.append({'name':'Latency target','passed':(event.get('latency_ms') or 10**12)<=case['max_latency_ms']})
         return checks
@@ -104,7 +92,7 @@ def mount(app):
                         request_id=response.headers.get('X-Request-ID')
                         event=store.one('SELECT * FROM events WHERE id=?',(request_id,)) or {}
                         text=data['choices'][0]['message'].get('content') or ''
-                        checks=result_checks(case,text,event)
+                        checks=await result_checks(case,text,event)
                         result.update(request_id=request_id,checks=checks,passed=all(check['passed'] for check in checks),latency_ms=event.get('latency_ms'),cost_micros=event.get('cost_micros'),input_tokens=event.get('input_tokens'),output_tokens=event.get('output_tokens'),contract_fingerprint=app.state.gateway.fingerprint(app.state.gateway.port(service)),quality_assertions=bool(case.get('contains') or case.get('json_schema')))
                         if body.store_outputs:result['output']=text[:20000]
                         store.run("UPDATE events SET request_kind='evaluation' WHERE id=?",(request_id,))
