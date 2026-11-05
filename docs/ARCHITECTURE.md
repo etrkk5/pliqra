@@ -39,6 +39,12 @@ The logical boxes share one Python process. The management API and static UI are
 
 External OIDC/SAML, SCIM and metrics integrations are optional. OIDC/SAML authenticate people; application API keys authenticate inference clients. An inference key cannot administer the workspace. `/metrics` uses a distinct monitoring token.
 
+## The primary user path
+
+Overview leads through endpoint connection, a real successful call, and an application contract. Its state is permission-scoped and independent of report filters. The same `/api/v1/getting-started` endpoint is available to automation. The optional administrator convenience route `/api/v1/application-connections` creates a key restricted to one service and negotiates its binding in one database transaction; a failed negotiation rolls back the key and its audit writes. Existing keys can still bind directly through the protocol endpoint.
+
+The overview surfaces unresolved advertised-inventory notices and application identities whose contracts need renewal. A fresh current binding resolves the renewal notice for that identity; old stale invocation paths continue to return 409. Expired or revoked credentials do not count as active application connections. Advanced administration remains accessible through the collapsed sidebar section.
+
 ## Endpoint onboarding
 
 ```mermaid
@@ -129,6 +135,7 @@ A password-encrypted backup contains a consistent SQLite snapshot and its encryp
 
 | Source | Responsibility |
 |---|---|
+| `pliqra/experience.py` | Permission-scoped onboarding, contract renewal state and atomic application connection |
 | `pliqra/main.py` | Application lifecycle, HTTP boundary, identity/session dependencies, management and protocol routes |
 | `pliqra/gateway.py` | Contract fingerprints, admission, routing, attempts, SSE, cache and usage settlement |
 | `pliqra/connectors.py` | Discovery and upstream format adaptation |

@@ -684,7 +684,7 @@ def create_app(data_dir=None):
     async def chat(body: ChatInput, p=Depends(principal)):
         return await app.state.gateway.chat(body.model_dump(exclude_none=True), p)
 
-    app.state.context = {"store":store,"vault":vault,"principal":principal,"user":user,"admin":admin,"session_response":session_response,"public_url":public_url,"secure_cookies":secure_cookies,"oauth":oauth,"PortInput":PortInput,"port_fields":port_fields}
+    app.state.context = {"store":store,"vault":vault,"principal":principal,"user":user,"admin":admin,"session_response":session_response,"public_url":public_url,"secure_cookies":secure_cookies,"oauth":oauth,"PortInput":PortInput,"port_fields":port_fields,"create_key":create_key,"KeyInput":KeyInput,"bind":bind,"BindingInput":BindingInput}
     from .operations import mount as mount_operations
     from .identity import mount as mount_identity
     from .reporting import mount as mount_reporting
@@ -693,6 +693,8 @@ def create_app(data_dir=None):
     mount_identity(app)
     mount_reporting(app)
     mount_evaluation(app)
+    from .experience import mount as mount_experience
+    mount_experience(app)
 
     @app.get('/sdk/pliqra_client.py',tags=['Protocol'])
     def download_client():

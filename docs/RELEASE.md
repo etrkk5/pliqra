@@ -4,7 +4,7 @@ Validated locally on 5 November 2026. This record describes observed behavior, n
 
 ## Automated checks
 
-- 30 tests pass on host Python 3.14 and in the Linux/Python 3.13 container.
+- 35 tests pass on host Python 3.14 and in the Linux/Python 3.13 container.
 - Coverage includes OpenAI-compatible/Ollama chat, fragmented Unicode streaming, incomplete streams, cancellation/accounting paths, pre-stream fallback, service fingerprints, revoked/expired/scoped keys, RPM/budget limits, project/team authorization and admin rollups, encrypted optional content/cache/backup, restore, interrupted-restore crash recovery and session invalidation, SCIM lifecycle, signed/tampered/replayed SAML responses, asynchronous evaluations and positive function/structured-output/streaming capability probes.
 - Dependency deprecation warnings remain in Authlib/httpx and the SAML toolkit; no failing assertions are suppressed.
 - The Docker runtime runs as UID/GID 10001, persists a named volume and reports healthy. Its SAML XML signature runtime imports successfully (xmlsec 1.3.18 / libxml2 2.14.6 on the tested Linux ARM64 build).
@@ -16,6 +16,10 @@ Native HTTPS was exercised in a separate temporary container using a test certif
 A separate workspace at port 8081, with a clearly synthetic upstream, was used for all sample traffic. The user workspace at port 8088 was not seeded with demo accounts or models.
 
 Verified: administrator sign-in; overview; usage/team/key breakdowns; team-to-request drill-down; individual attempt/timing/usage details; audited captured-content inspection; service policy dialog; application capability-binding wizard and generated invocation; evaluation creation/execution/results; operations; identity configuration entry points; settings/client/specification links; project/team-attributed streaming playground. The sidebar also operated in a narrow viewport. The charcoal/orange theme is preserved.
+
+The focused three-step overview was exercised from an empty workspace through endpoint discovery, the first real streaming request, and automatic creation of an application key plus binding. Changing service policy produced a visible renewal notice and an HTTP 409 for the old binding. Rebinding the same application identity through the console cleared the notice. Fresh screenshots also cover services, request details and cumulative team-filtered reporting with advanced navigation collapsed.
+
+Five additional regression tests cover retained inference evidence, atomic key-and-binding creation with rollback on unsupported capabilities, service-restricted generated credentials, scoped onboarding visibility, revoked credentials and removed project access, renewal after service changes, and HTTP 409 before upstream access when a service is renamed or its input limit is tightened.
 
 ## Independent interoperability
 

@@ -176,8 +176,12 @@ class Gateway:
             raise
 
     async def route(self,body,principal,binding=None,request_kind='inference'):
-        port=self.port(body['model'])
+        if binding and (binding['principal']!=principal['id'] or binding['expires']<=now()):
+            raise HTTPException(403,'Binding belongs to another identity or has expired')
+        port=self.port(binding['port_id'] if binding else body['model'])
         self.authorize_port(principal,port)
+        if binding and (body['model'] not in (port['id'],port['name']) or binding['fingerprint']!=self.fingerprint(port)):
+            raise HTTPException(409,'Service contract changed. Discover and bind again; no silent model substitution was performed.')
         if not port['enabled']:raise HTTPException(409,'AI service is disabled')
         if len(encode(body['messages']))>port.get('max_input_chars',200000):raise HTTPException(422,'Input exceeds this service\'s configured character limit')
         requested=body.get('max_completion_tokens',body.get('max_tokens',min(1024,port.get('max_output_tokens',32768))))
@@ -191,8 +195,6 @@ class Gateway:
         for message in body['messages']:
             if isinstance(message.get('content'),list) and any(part.get('type') in ('image_url','input_image') for part in message['content'] if isinstance(part,dict)):required.add('vision')
         if binding:
-            if binding['principal']!=principal['id'] or binding['expires']<=now():raise HTTPException(403,'Binding belongs to another identity or has expired')
-            if binding['port_id']!=port['id'] or binding['fingerprint']!=self.fingerprint(port):raise HTTPException(409,'Service contract changed. Discover and bind again; no silent model substitution was performed.')
             required.update(json.loads(binding['requirements']))
         candidates,decisions=self.candidates(port,required)
         if not candidates:raise HTTPException(422,{'message':'No deployment satisfies the required capabilities','decisions':decisions})

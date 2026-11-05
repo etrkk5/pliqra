@@ -3,7 +3,7 @@
 </p>
 
 <h1 align="center">Pliqra</h1>
-<p align="center"><strong>Plug in intelligence.</strong><br>Turn a model endpoint into an AI service your applications can discover, trust and use.</p>
+<p align="center"><strong>Know what you connect to.</strong><br>Discover capabilities. Verify behavior. See when your service contract changes.</p>
 <p align="center">
   <a href="https://github.com/etrkk5/pliqra/actions/workflows/test.yml"><img src="https://github.com/etrkk5/pliqra/actions/workflows/test.yml/badge.svg" alt="Tests"></a>
   · <a href="#run-pliqra-in-two-minutes">Quick start</a>
@@ -12,11 +12,13 @@
   · <a href="docs/PROTOCOL.md">Protocol</a>
 </p>
 
-![Pliqra console: models, request activity, cost and routing visibility](docs/screenshots/overview.jpg)
+![Pliqra overview: connect an endpoint, make a real call, connect an application](docs/screenshots/overview.jpg)
 
-**Bring the endpoint. Pliqra connects the rest.**
+**Know the agreement. See when it changes.**
 
-You already have a model running. Pliqra turns its endpoint into a stable AI service, adds identity and usage policies, and makes every request explainable. Start with the OpenAI-compatible API immediately, or negotiate a capability contract through the independent Pliqra protocol client.
+Bring a running model endpoint. Pliqra shows what it advertises, records what has actually been verified, and gives your application an explicit connection contract. When service policy or advertised model metadata changes, a stale binding is rejected with HTTP 409 and the overview shows how many application identities need to reconnect to the selected service.
+
+The first-use path is **connect an endpoint → make a real call → connect your application**. Administrators can create a service-scoped key and binding together in the connection dialog; existing keys remain supported. Workspace identity, evaluations, operations and other advanced controls stay available under **Advanced tools**. The OpenAI-compatible API works without an explicit binding when that is all you need.
 
 Everything runs in **one Docker image**: the console, management API, gateway, reporting and persistent storage. No Kubernetes, external database, identity server or frontend build pipeline is required for a local setup. Connect standards-compatible company identity when you need it.
 
@@ -44,6 +46,8 @@ docker compose up --build -d
 ```
 
 Open **http://localhost:8088**, create your administrator account, and connect a model endpoint. No default password, demo account or sample traffic is shipped.
+
+Follow the three cards on **Overview**. Progress comes from retained successful inference records and current, unexpired bindings, independently of reporting filters. The contract panel separates declared capabilities from observed verification. No inference or paid probe runs automatically during onboarding.
 
 Prefer a single Docker command sequence?
 
@@ -121,6 +125,12 @@ All screenshots come from the actual running console in an isolated demonstratio
 
 ![Pliqra application binding with a fingerprinted contract and invocation example](docs/screenshots/application-binding.jpg)
 
+### See when an application needs to reconnect
+
+The selected service shows active application identities whose contract no longer matches. A fresh binding for the same identity clears its renewal notice. Revoked credentials, expired bindings and identities that lost access do not count as active connections. Drift detection covers service configuration and advertised model metadata; undisclosed model-weight changes behind an unchanged endpoint cannot be inferred.
+
+![Pliqra overview warning that a changed service contract requires application renewal](docs/screenshots/contract-change.jpg)
+
 ### Follow the request all the way through
 
 ![Pliqra request detail with routing, model attempts, latency and consumption](docs/screenshots/request-detail.jpg)
@@ -157,6 +167,8 @@ All screenshots come from the actual running console in an isolated demonstratio
 | Portability | Credential-free export/import with local deployment mapping, fingerprinted discovery/binding/invoke protocol, dependency-free Python client and independent reference server |
 
 All supported configuration is available through the interface and `/api/v1/*`. `/openapi.json` describes the API; **Settings & API** displays operations offline and offers the Python client and protocol specification for download. The dashboard requires no external fonts, scripts, analytics, or CDN.
+
+For automation, `GET /api/v1/getting-started?service_id=...` exposes the same scoped onboarding state. Administrators can use `POST /api/v1/application-connections` to create a service-restricted key and binding atomically. Failed capability negotiation leaves no orphan key. The generated key permits 60 requests/minute, expires after 90 days, and is returned only once; the binding lifetime is independently configurable.
 
 ## Administrator visibility
 
