@@ -94,7 +94,7 @@ def backup_bytes(store, vault, password):
         with store.lock:
             store.conn.backup(destination)
         destination.close()
-        payload = encode({"format": "pliqra-backup/1", "schema": 2, "created": now(), "database": base64.b64encode(path.read_bytes()).decode(), "key": vault.key.decode()}).encode()
+        payload = encode({"format": "pliqra-backup/1", "schema": 3, "created": now(), "database": base64.b64encode(path.read_bytes()).decode(), "key": vault.key.decode()}).encode()
     return b"PLQBACK01" + salt + Fernet(key).encrypt(payload)
 
 
@@ -105,7 +105,7 @@ def restore_bytes(store, vault, archive, password):
     key = base64.urlsafe_b64encode(hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 600000))
     try:
         payload = json.loads(Fernet(key).decrypt(archive[25:]))
-        if payload["format"] not in ("pliqra-backup/1","modelport-backup/1") or payload["schema"] != 2:
+        if payload["format"] not in ("pliqra-backup/1","modelport-backup/1") or payload["schema"] not in (2,3):
             raise ValueError()
         replacement = payload["key"].encode()
         Fernet(replacement)
@@ -120,7 +120,7 @@ def restore_bytes(store, vault, archive, password):
         path.write_bytes(raw)
         try:
             source = sqlite3.connect(path)
-            if source.execute("PRAGMA integrity_check").fetchone()[0] != "ok" or source.execute("PRAGMA user_version").fetchone()[0] != 2:
+            if source.execute("PRAGMA integrity_check").fetchone()[0] != "ok" or source.execute("PRAGMA user_version").fetchone()[0] not in (2,3):
                 raise ValueError()
             if not source.execute("SELECT id FROM users WHERE role='admin' AND issuer='local' AND active=1").fetchone():
                 raise ValueError()
@@ -139,6 +139,7 @@ def restore_bytes(store, vault, archive, password):
             (store.directory/'pending-restore').write_text('rollback-on-restart')
             try:
                 source.backup(store.conn)
+                store.migrate()
                 if not environment_key:
                     key_path = store.directory / "encryption.key"
                     temp_key = store.directory / "encryption.key.new"
@@ -240,6 +241,8 @@ async def maintain(app):
                     store.run("DELETE FROM attempts WHERE event_id IN (SELECT id FROM events WHERE started<? AND status!='pending' AND reserved_micros=0)",(cutoff,))
                     store.run("DELETE FROM events WHERE started<? AND status!='pending' AND reserved_micros=0",(cutoff,))
                     store.run("DELETE FROM cache_entries WHERE expires<?",(now(),))
+                    store.run("DELETE FROM gateway_requests WHERE started<? AND status!='pending'",(now()-2592000,))
+                    store.run("DELETE FROM guardrail_decisions WHERE created<?",(cutoff,))
                     store.run("DELETE FROM sessions WHERE expires<?",(now(),))
                     store.run("DELETE FROM bindings WHERE expires<?",(now(),))
                     store.run("DELETE FROM saml_flows WHERE expires<?",(now(),))
@@ -401,6 +404,8 @@ def mount(app):
         if body.input_tokens is not None and body.output_tokens is not None:fields.update(input_tokens=body.input_tokens,output_tokens=body.output_tokens,usage_source="reconciled")
         with store.transaction():
             store.update("events",record_id,fields)
+            if body.input_tokens is not None and body.output_tokens is not None and store.one("SELECT id FROM gateway_requests WHERE id=?",(record_id,)):
+                store.update("gateway_requests",record_id,{"tokens":body.input_tokens+body.output_tokens})
             store.audit(p["id"],"usage.reconciled",record_id,{"before_cost":row["cost_micros"],"after":fields})
         return {"ok":True}
 

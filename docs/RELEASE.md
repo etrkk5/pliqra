@@ -1,10 +1,10 @@
-# Pliqra 1.0 — validation record
+# Pliqra 1.1 — validation record
 
-Validated locally on 5 November 2026. This record describes observed behavior, not a security certification or a claim of every-provider compatibility.
+Baseline validated locally on 5 November 2026; gateway/guardrail additions validated on 6 November 2026. This record describes observed behavior, not a security certification or a claim of every-provider compatibility.
 
 ## Automated checks
 
-- 35 tests pass on host Python 3.14 and in the Linux/Python 3.13 container.
+- 51 tests pass on host Python 3.14 and in the Linux/Python 3.13 container.
 - Coverage includes OpenAI-compatible/Ollama chat, fragmented Unicode streaming, incomplete streams, cancellation/accounting paths, pre-stream fallback, service fingerprints, revoked/expired/scoped keys, RPM/budget limits, project/team authorization and admin rollups, encrypted optional content/cache/backup, restore, interrupted-restore crash recovery and session invalidation, SCIM lifecycle, signed/tampered/replayed SAML responses, asynchronous evaluations and positive function/structured-output/streaming capability probes.
 - Dependency deprecation warnings remain in Authlib/httpx and the SAML toolkit; no failing assertions are suppressed.
 - The Docker runtime runs as UID/GID 10001, persists a named volume and reports healthy. Its SAML XML signature runtime imports successfully (xmlsec 1.3.18 / libxml2 2.14.6 on the tested Linux ARM64 build).
@@ -20,6 +20,14 @@ Verified: administrator sign-in; overview; usage/team/key breakdowns; team-to-re
 The focused three-step overview was exercised from an empty workspace through endpoint discovery, the first real streaming request, and automatic creation of an application key plus binding. Changing service policy produced a visible renewal notice and an HTTP 409 for the old binding. Rebinding the same application identity through the console cleared the notice. Fresh screenshots also cover services, request details and cumulative team-filtered reporting with advanced navigation collapsed.
 
 Five additional regression tests cover retained inference evidence, atomic key-and-binding creation with rollback on unsupported capabilities, service-restricted generated credentials, scoped onboarding visibility, revoked credentials and removed project access, renewal after service changes, and HTTP 409 before upstream access when a service is renamed or its input limit is tightened.
+
+## Gateway and guardrail validation
+
+Sixteen additional tests exercise policy-bound keys on named/standard/protocol paths, scoped catalogs, atomic concurrent admission, token reservations and settlement, per-owner quotas across keys and rolling expiry, input blocks without model usage, output blocking before SSE delivery, local redaction, observation, strict custom HTTP verdicts, NeMo request/decision fixtures, fail-closed errors, JSON Schema output checks, policy/guardrail fingerprint invalidation, in-flight guardrail snapshots, version rollback, audited quota reconciliation and schema-2 workspace migration.
+
+The browser run created and cloned gateways with minute/day windows and three simultaneous quota rules, configured ordered input/output checks, issued a gateway-bound key, previewed admission without inference, and made real requests through the selected playground gateway. A standard-library HTTP validator was called over Docker networking: a prohibited synthetic phrase was blocked before inference; an accepted email-containing request recorded input redaction and both output verdicts.
+
+NeMo configuration fields were exercised without an external call. The decision adapter is validated with controlled fixtures matching the published check-API shape; a real NeMo deployment was not available. No actual provider deployment or security-policy effectiveness is implied by these fixtures. Gateway-managed load/latency was not benchmarked; the earlier load measurement below describes the pre-guardrail baseline.
 
 ## Independent interoperability
 
@@ -42,7 +50,7 @@ These are local end-to-end synthetic measurements, including Docker networking a
 
 ## Supported release boundary
 
-One workspace, one process and one persistent volume. Generic OIDC/SAML/SCIM are implemented and tested with controlled standards fixtures; the intended real identity provider and real LLM endpoint still require their own configuration and acceptance test. Inference is the documented chat-completions subset. PostgreSQL/HA, distributed quotas, provider-native APIs, embeddings/audio, full native Ollama tool adaptation and a general guardrail engine are outside release 1.0. The connection protocol remains draft 0.1.
+One workspace, one process and one persistent volume. Generic OIDC/SAML/SCIM are implemented and tested with controlled standards fixtures; the intended real identity provider and real LLM endpoint still require their own configuration and acceptance test. Inference is the documented chat-completions subset. PostgreSQL/HA, distributed quotas, provider-native APIs, embeddings/audio, full native Ollama tool adaptation and vendor-specific native safety engines are outside release 1.1. Named gateways and the documented local/NeMo-check/custom-HTTP execution layer are included. The connection protocol remains draft 0.1.
 
 ## Pliqra rename verification
 

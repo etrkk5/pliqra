@@ -132,11 +132,13 @@ class Store:
             "deployments": {"metadata_hash": "TEXT NOT NULL DEFAULT ''", "available": "INTEGER NOT NULL DEFAULT 1", "failure_count": "INTEGER NOT NULL DEFAULT 0", "open_until": "REAL NOT NULL DEFAULT 0", "verified_at": "REAL"},
             "ports": {"project_id": "TEXT", "verified_only": "INTEGER NOT NULL DEFAULT 0", "cache_ttl": "INTEGER NOT NULL DEFAULT 0", "max_input_chars": "INTEGER NOT NULL DEFAULT 200000", "max_output_tokens": "INTEGER NOT NULL DEFAULT 32768", "log_content": "INTEGER NOT NULL DEFAULT 0"},
             "projects": {"max_concurrency": "INTEGER NOT NULL DEFAULT 20"},
-            "api_keys": {"created_by": "TEXT", "team_id": "TEXT"},
+            "api_keys": {"created_by": "TEXT", "team_id": "TEXT", "gateway_id": "TEXT"},
+            "bindings": {"gateway_id": "TEXT", "gateway_fingerprint": "TEXT"},
             "events": {"request_kind": "TEXT NOT NULL DEFAULT 'inference'", "reconciled_by": "TEXT", "reconciliation_note": "TEXT", "cache_hit": "INTEGER NOT NULL DEFAULT 0", "price_snapshot": "TEXT", "team_id": "TEXT", "actor_user_id": "TEXT", "known_cost_micros": "INTEGER NOT NULL DEFAULT 0"},
             "identity_providers": {"protocol": "TEXT NOT NULL DEFAULT 'oidc'", "config": "TEXT NOT NULL DEFAULT '{}'"},
             "users": {"external_id": "TEXT", "groups": "TEXT NOT NULL DEFAULT '[]'", "username": "TEXT NOT NULL DEFAULT ''"},
         }
+        additions["events"].update(gateway_id="TEXT", gateway_name="TEXT", gateway_fingerprint="TEXT", delivery="TEXT")
         with self.transaction():
             for table, columns in additions.items():
                 existing = {row["name"] for row in self.all(f"PRAGMA table_info({table})")}
@@ -144,6 +146,13 @@ class Store:
                     if name not in existing:
                         self.run(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
             for statement in [
+                "CREATE TABLE IF NOT EXISTS gateway_profiles (id TEXT PRIMARY KEY,name TEXT NOT NULL,slug TEXT NOT NULL UNIQUE,config TEXT NOT NULL,version INTEGER NOT NULL,created REAL NOT NULL,updated REAL NOT NULL)",
+                "CREATE TABLE IF NOT EXISTS gateway_versions (gateway_id TEXT NOT NULL,version INTEGER NOT NULL,document TEXT NOT NULL,actor TEXT NOT NULL,created REAL NOT NULL,PRIMARY KEY(gateway_id,version))",
+                "CREATE TABLE IF NOT EXISTS guardrails (id TEXT PRIMARY KEY,name TEXT NOT NULL,provider TEXT NOT NULL,config TEXT NOT NULL,secret TEXT,version INTEGER NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,created REAL NOT NULL,updated REAL NOT NULL)",
+                "CREATE TABLE IF NOT EXISTS gateway_requests (id TEXT PRIMARY KEY,gateway_id TEXT NOT NULL,fingerprint TEXT NOT NULL,principal TEXT NOT NULL,user_id TEXT,key_id TEXT,project_id TEXT,team_id TEXT,port_id TEXT NOT NULL,started REAL NOT NULL,status TEXT NOT NULL,tokens INTEGER NOT NULL,reservation INTEGER NOT NULL)",
+                "CREATE INDEX IF NOT EXISTS gateway_requests_window ON gateway_requests(gateway_id,started)",
+                "CREATE TABLE IF NOT EXISTS guardrail_decisions (id TEXT PRIMARY KEY,event_id TEXT,gateway_id TEXT,guardrail_id TEXT NOT NULL,name TEXT NOT NULL,stage TEXT NOT NULL,outcome TEXT NOT NULL,mode TEXT NOT NULL,on_error TEXT NOT NULL,latency_ms REAL NOT NULL,created REAL NOT NULL)",
+                "CREATE INDEX IF NOT EXISTS guardrail_decisions_event ON guardrail_decisions(event_id)",
                 "CREATE TABLE IF NOT EXISTS memberships (project_id TEXT NOT NULL REFERENCES projects(id),user_id TEXT NOT NULL REFERENCES users(id),role TEXT NOT NULL,source TEXT NOT NULL DEFAULT 'manual',PRIMARY KEY(project_id,user_id,source))",
                 "CREATE TABLE IF NOT EXISTS teams (id TEXT PRIMARY KEY,name TEXT NOT NULL UNIQUE,created REAL NOT NULL)",
                 "CREATE TABLE IF NOT EXISTS team_members (team_id TEXT NOT NULL REFERENCES teams(id),user_id TEXT NOT NULL REFERENCES users(id),PRIMARY KEY(team_id,user_id))",
@@ -167,7 +176,8 @@ class Store:
                 "CREATE TABLE IF NOT EXISTS saml_assertions (id TEXT PRIMARY KEY,expires REAL NOT NULL)",
             ]:
                 self.run(statement)
-            self.run("PRAGMA user_version=2")
+            self.run("PRAGMA user_version=3")
+            self.run("UPDATE gateway_requests SET status='interrupted' WHERE status='pending'")
         self.run("UPDATE evaluations SET status='interrupted',error='Gateway restarted during evaluation',finished=? WHERE status IN ('queued','running')", (now(),))
 
     def setting(self, key, default=None):

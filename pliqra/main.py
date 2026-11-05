@@ -117,6 +117,7 @@ class KeyInput(BaseModel):
     name: Name
     project_id: str = "default"
     team_id: str | None = None
+    gateway_id: str | None = None
     allowed_ports: list[str] = []
     rpm: Annotated[int, Field(ge=1, le=100000)] = 60
     expires_days: Annotated[int | None, Field(ge=1, le=365)] = 90
@@ -142,6 +143,7 @@ class UserUpdate(BaseModel):
 
 class BindingInput(BaseModel):
     service: str
+    gateway_id: str | None = None
     requirements: list[str] = []
     ttl_seconds: Annotated[int, Field(ge=60, le=86400)] = 3600
 
@@ -511,8 +513,16 @@ def create_app(data_dir=None):
             raise HTTPException(422,"Team is not assigned to this project")
         for port_id in body.allowed_ports:
             app.state.gateway.port(port_id)
+        if body.gateway_id:
+            profile=app.state.gateway.policies.profile(body.gateway_id)
+            if profile['config']['project_id'] and profile['config']['project_id']!=body.project_id:
+                raise HTTPException(422,'Use the project assigned to this gateway')
+            if profile['config']['team_ids'] and body.team_id not in profile['config']['team_ids']:
+                raise HTTPException(422,'Use a team allowed by this gateway')
+            if set(body.allowed_ports)-set(profile['config']['services']):
+                raise HTTPException(422,'Key services must be published by this gateway')
         token, record_id = "plq_" + secrets.token_urlsafe(32), uid("key_")
-        store.insert("api_keys", {"id": record_id, "name": body.name, "token_hash": digest(token), "prefix": token[:10], "project_id": body.project_id, "allowed_ports": encode(body.allowed_ports), "rpm": body.rpm, "expires": now() + body.expires_days * 86400 if body.expires_days else None, "team_id":body.team_id,"created_by":p["id"], "created": now()})
+        store.insert("api_keys", {"id": record_id, "name": body.name, "token_hash": digest(token), "prefix": token[:10], "project_id": body.project_id, "allowed_ports": encode(body.allowed_ports), "rpm": body.rpm, "expires": now() + body.expires_days * 86400 if body.expires_days else None, "team_id":body.team_id,"gateway_id":profile['id'] if body.gateway_id else None,"created_by":p["id"], "created": now()})
         store.audit(p["id"], "key.created", record_id, {"name": body.name, "project_id": body.project_id})
         return {"id": record_id, "token": token, "note": "This key is shown once. Store it securely."}
 
@@ -635,7 +645,7 @@ def create_app(data_dir=None):
 
     @app.get("/.well-known/pliqra", tags=["Protocol"])
     def protocol():
-        return {"protocol": "pliqra/0.1-draft", "status": "experimental", "discovery": "/protocol/v1/services", "bind": "/protocol/v1/bindings", "authentication": "Bearer access key", "features": ["capability-discovery", "contract-fingerprint", "explicit-binding", "decision-records"], "invocation_interfaces": ["openai-chat-completions"]}
+        return {"protocol": "pliqra/0.1-draft", "status": "experimental", "discovery": "/protocol/v1/services", "bind": "/protocol/v1/bindings", "authentication": "Bearer access key", "gateway_policy": "/protocol/v1/gateway", "features": ["capability-discovery", "contract-fingerprint", "explicit-binding", "decision-records"], "invocation_interfaces": ["openai-chat-completions"]}
 
     @app.get("/protocol/v1/services", tags=["Protocol"])
     def services(p=Depends(principal)):
@@ -653,10 +663,16 @@ def create_app(data_dir=None):
     def bind(body: BindingInput, p=Depends(principal)):
         port = app.state.gateway.port(body.service)
         app.state.gateway.authorize_port(p, port)
+        policy=app.state.gateway.policies.resolve(p,port,body.gateway_id)
+        if policy and (('tools' in body.requirements and not policy['config']['allow_tools']) or ('vision' in body.requirements and not policy['config']['allow_vision'])):
+            raise HTTPException(422,'Required capabilities are disabled by this gateway policy')
         eligible, decisions = app.state.gateway.candidates(port, body.requirements)
         if not eligible:
             raise HTTPException(422, {"message": "No deployment satisfies this contract", "decisions": decisions})
-        binding = {"id": uid("bind_"), "principal": p["id"], "port_id": port["id"], "version": port["version"], "fingerprint": app.state.gateway.fingerprint(port), "requirements": encode(body.requirements), "expires": now() + body.ttl_seconds, "created": now()}
+        if policy and policy['config']['require_verified']:
+            eligible,decisions=app.state.gateway.candidates({**port,'verified_only':True},body.requirements)
+            if not eligible:raise HTTPException(422,'No deployment has the gateway-required verified capabilities')
+        binding = {"id": uid("bind_"), "principal": p["id"], "port_id": port["id"], "version": port["version"], "fingerprint": app.state.gateway.fingerprint(port), "requirements": encode(body.requirements), "expires": now() + body.ttl_seconds, "created": now(),"gateway_id":policy['id'] if policy else None,"gateway_fingerprint":policy['fingerprint'] if policy else None}
         store.insert("bindings", binding)
         store.audit(p["id"], "binding.created", binding["id"], {"service": port["name"], "version": port["version"]})
         return {**binding, "requirements": body.requirements, "invoke": f"/protocol/v1/bindings/{binding['id']}/invoke", "service": port["name"]}
@@ -684,7 +700,7 @@ def create_app(data_dir=None):
     async def chat(body: ChatInput, p=Depends(principal)):
         return await app.state.gateway.chat(body.model_dump(exclude_none=True), p)
 
-    app.state.context = {"store":store,"vault":vault,"principal":principal,"user":user,"admin":admin,"session_response":session_response,"public_url":public_url,"secure_cookies":secure_cookies,"oauth":oauth,"PortInput":PortInput,"port_fields":port_fields,"create_key":create_key,"KeyInput":KeyInput,"bind":bind,"BindingInput":BindingInput}
+    app.state.context = {"store":store,"vault":vault,"principal":principal,"user":user,"admin":admin,"session_response":session_response,"public_url":public_url,"secure_cookies":secure_cookies,"oauth":oauth,"PortInput":PortInput,"port_fields":port_fields,"create_key":create_key,"KeyInput":KeyInput,"bind":bind,"BindingInput":BindingInput,"ChatInput":ChatInput}
     from .operations import mount as mount_operations
     from .identity import mount as mount_identity
     from .reporting import mount as mount_reporting
@@ -695,6 +711,8 @@ def create_app(data_dir=None):
     mount_evaluation(app)
     from .experience import mount as mount_experience
     mount_experience(app)
+    from .fabric import mount as mount_fabric
+    mount_fabric(app)
 
     @app.get('/sdk/pliqra_client.py',tags=['Protocol'])
     def download_client():

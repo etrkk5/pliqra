@@ -52,13 +52,13 @@ Follow the three cards on **Overview**. Progress comes from retained successful 
 Prefer a single Docker command sequence?
 
 ```sh
-docker build -t pliqra:1.0.0 .
+docker build -t pliqra:1.1.0 .
 docker run -d --name pliqra \
   -p 127.0.0.1:8088:8080 \
   -v pliqra-data:/data \
   --add-host host.docker.internal:host-gateway \
   --restart unless-stopped \
-  pliqra:1.0.0
+  pliqra:1.1.0
 ```
 
 Open http://localhost:8088, create your administrator, then **Connect model**. Supply a running OpenAI-compatible or Ollama endpoint. Models become stable named AI services automatically. A manual model name handles servers without model-list discovery. No accounts, credentials, or sample traffic are seeded.
@@ -150,6 +150,21 @@ The selected service shows active application identities whose contract no longe
 
 ![Pliqra streaming playground with project and team attribution](docs/screenshots/playground.jpg)
 
+## Build a gateway for each workload
+
+Pliqra now brings the model-as-a-service catalog, inference routing, identity, quotas and guardrail execution into one console. Administrators can publish separate gateways for teams or applications, each with its own address and versioned policy. Keys assigned to a gateway enforce its policy on every inference path.
+
+- Combine request and token quotas across independent rolling windows and gateway, key, user/owner, project, team or service scopes.
+- Set concurrent-request, input/output and capability controls while retaining service routing, key RPM limits and project budgets.
+- Chain local checks, NVIDIA NeMo check-API providers and custom HTTP validators before inference and before output delivery. Choose enforcement or observation and an explicit failure policy per step.
+- Preview admission without inference, try the gateway in the playground, issue scoped keys, inspect decisions, clone policies, export/import definitions and restore prior versions.
+
+![Named Pliqra gateways with independent token, request and guardrail policies](docs/screenshots/gateways.jpg)
+
+![Pliqra policy preview with rolling quotas and checked response delivery](docs/screenshots/gateway-preview.jpg)
+
+See [the gateway and guardrail guide](docs/GATEWAYS.md) for configuration, APIs, architecture, quota accounting, streaming and the exact NeMo compatibility boundary. External engines remain optional services; Pliqra itself still runs in one container.
+
 ## Capabilities
 
 | Area | Supported behavior |
@@ -157,6 +172,8 @@ The selected service shows active application identities whose contract no longe
 | Connections | Discovery, manual registration, custom authentication header/prefix, credential rotation, enable/disable, scheduled health checks and inventory drift alerts |
 | AI services | Stable names, priority/fallback and round-robin routing, capability requirements, project access, input/output limits, exact encrypted cache, configuration preview, version history and rollback |
 | Evidence | Declared capabilities separate from actual verification; explicit chat, streaming, function-call and JSON Schema probes; metadata drift resets verification |
+| Named gateways | Versioned service catalogs, project/team restrictions, rolling request/token quotas, six quota scopes, concurrency, inference controls, clone/export/import, preview and policy-aware keys |
+| Guardrails | Ordered input/output chains; local phrase/PII/schema checks; NeMo check-API and custom HTTP decision providers; enforce/observe; explicit error policy; per-request verdicts; guarded SSE delivery |
 | Applications | OpenAI-compatible model list and chat completions, streaming, scoped/expiring/revocable keys, key rotation, RPM, project concurrency and budget admission |
 | Access | Local accounts; workspace administrators; direct project memberships; teams with member/manager grants; OIDC with PKCE; SAML 2.0; provider-scoped SCIM user/group provisioning and deprovisioning |
 | Reporting | Workspace totals and team/project/user/key/service/model breakdowns; custom time, status, latency, transport, connection and request-type filters; paginated requests; complete filtered CSV export |
@@ -203,7 +220,7 @@ result = connection.complete([{"role": "user", "content": "Hello"}])
 # Contract changes raise ContractChanged (HTTP 409); explicitly discover/bind again.
 ```
 
-See [the protocol](docs/PROTOCOL.md) for the handshake, portability boundary, and independent server. Product version 1.0 and protocol draft 0.1 have separate lifecycles. This is an implemented draft, not an established industry standard.
+See [the protocol](docs/PROTOCOL.md) for the handshake, portability boundary, and independent server. Product version 1.1 and protocol draft 0.1 have separate lifecycles. This is an implemented draft, not an established industry standard.
 
 ## Identity setup
 
@@ -253,7 +270,7 @@ Costs are configured-price **estimates**, not invoices. Each attempted upstream 
 
 Runtime retention defaults to 90 days and cannot be shorter than 32 days, preserving current-month budgets. Pending requests and unresolved reservations are retained. Captured content follows its request's retention; test sets and explicitly saved evaluation outputs remain until deleted. Prometheus `/metrics` uses a separate monitoring bearer token created in **Operations**.
 
-The supported deployment is **one workspace, one process, one persistent volume**. Project isolation is authorization inside that workspace; it is not separate physical tenants. Horizontal scaling, distributed quotas and PostgreSQL are not in this release. Chat completions are a supported subset: no multi-choice `n>1`, Responses API, embeddings, audio, model training or model deployment management. OpenAI-compatible function calling/structured output is supported; native Ollama tool-loop/stream shapes require adapter-specific conformance before use. Optional policies are not a general DLP or guardrail engine.
+The supported deployment is **one workspace, one process, one persistent volume**. Project isolation is authorization inside that workspace; it is not separate physical tenants. Horizontal scaling, distributed quotas and PostgreSQL are not in this release. Chat completions are a supported subset: no multi-choice `n>1`, Responses API, embeddings, audio, model training or model deployment management. OpenAI-compatible function calling/structured output is supported; native Ollama tool-loop/stream shapes require adapter-specific conformance before use. Gateway policies compose local, NeMo check-API and custom HTTP guardrails; local patterns are not a complete DLP or semantic safety engine.
 
 ## Upgrading from the earlier Model Port build
 
@@ -271,7 +288,7 @@ docker run -d --name pliqra \
   -p 127.0.0.1:8088:8080 \
   -v modelport-data:/data \
   --add-host host.docker.internal:host-gateway \
-  --restart unless-stopped pliqra:1.0.0
+  --restart unless-stopped pliqra:1.1.0
 ```
 
 The volume name is an existing storage reference, not the product name. Do not run the old and new processes on the same volume simultaneously. Restore the pre-upgrade backup before returning to the old build.

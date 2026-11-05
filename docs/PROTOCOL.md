@@ -67,4 +67,8 @@ The conformance command checks discovery, binding and unsupported capability rej
 
 `GET /api/v1/ports/{id}/export` produces `pliqra/service-export/v1`: a service policy plus named deployment references, model names, adapter labels and connection labels. Credentials, endpoint addresses and local project grants are excluded. `POST /api/v1/ports/import` requires mapping every reference to an existing local deployment. Unknown policy fields and unmapped deployments are rejected; destination project access is set explicitly. Native manifests and portable service exports serve different purposes.
 
-The protocol remains draft 0.1 although the gateway product is version 1.0. The independent client has been exercised against both implementations for discovery, bindings, completions, streaming and rejection of unsupported capabilities. This establishes interoperability between these implementations; it does not establish third-party adoption or ecosystem-wide standardization.
+The protocol remains draft 0.1 although the gateway product is version 1.1. The independent client has been exercised against both implementations for discovery, bindings, completions, streaming and rejection of unsupported capabilities. This establishes interoperability between these implementations; it does not establish third-party adoption or ecosystem-wide standardization.
+
+## Optional managed-gateway policy
+
+Pliqra gateway keys apply their assigned policy to discovery, plain chat and bound invocation. The discovery document advertises an optional gateway_policy path. GET /protocol/v1/gateway returns the effective credential-free policy contract; bindings include optional gateway_id and gateway_fingerprint fields. A policy or referenced guardrail change invalidates the accepted gateway fingerprint and requires a new binding. Independent implementations may omit these extensions. See [gateway policies](GATEWAYS.md) for accounting and guardrail delivery semantics.

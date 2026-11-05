@@ -112,6 +112,16 @@ The fingerprint covers the service policy, deployment configuration and advertis
 
 No fallback or automatic replay occurs once streaming has started. Missing terminal markers produce an incomplete record; cancellation closes the upstream connection and frees local capacity. Provider-side compute cancellation is best effort.
 
+## Named gateways and guardrails
+
+Administrators can define multiple named gateways over the existing stable-service catalog. The policy layer adds service selection, project/team restrictions, composable request/token windows, concurrency, inference controls and ordered input/output checks. Assigned keys enforce the same policy on standard, named and protocol inference routes. Existing service/key/project admission remains active.
+
+Gateway admission and budget/key checks share one SQLite transaction. A separate durable ledger reserves tokens across possible attempts and retains up to 30 days independently of reporting retention. Reported usage settles reservations; uncertain usage stays reserved until window expiry or audited reconciliation. Restarted requests release concurrency but preserve uncertain token charges.
+
+Each accepted request carries a gateway fingerprint and a coherent guardrail configuration snapshot. Gateway or referenced check updates invalidate bound contracts. Input-only checks preserve upstream streaming. Output checks use a complete non-streaming upstream response, then run the output chain before emitting JSON or compatible buffered SSE. Verdict records exclude checked content and remote response text.
+
+The NeMo adapter calls the check API; the custom HTTP contract allows other validators behind a small adapter. External engines are optional separate services. See [managed gateways](GATEWAYS.md) for the sequence diagram, API, configuration, compatibility and accounting boundaries.
+
 ## Authorization and attribution
 
 | Identity | Services | Request history | Administration |
@@ -135,6 +145,8 @@ A password-encrypted backup contains a consistent SQLite snapshot and its encryp
 
 | Source | Responsibility |
 |---|---|
+| pliqra/policies.py | Policy contracts, snapshots, atomic rolling quotas, token settlement and local/remote guardrail execution |
+| pliqra/fabric.py | Named gateway and guardrail management, preview, versions, exports, provider tests and inference paths |
 | `pliqra/experience.py` | Permission-scoped onboarding, contract renewal state and atomic application connection |
 | `pliqra/main.py` | Application lifecycle, HTTP boundary, identity/session dependencies, management and protocol routes |
 | `pliqra/gateway.py` | Contract fingerprints, admission, routing, attempts, SSE, cache and usage settlement |

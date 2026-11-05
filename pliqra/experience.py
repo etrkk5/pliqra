@@ -15,6 +15,8 @@ class ApplicationConnection(BaseModel):
     service: str
     name: Annotated[str, Field(min_length=1, max_length=100)]
     project_id: str | None = None
+    gateway_id: str | None = None
+    team_id: str | None = None
     requirements: Annotated[list[str], Field(max_length=5)] = ['chat']
     ttl_seconds: Annotated[int, Field(ge=60, le=86400)] = 3600
 
@@ -60,15 +62,28 @@ def mount(app):
                 AND (? IS NULL OR u.role='admin' OR EXISTS(SELECT 1 FROM memberships m WHERE m.user_id=u.id AND m.project_id=?)
                     OR EXISTS(SELECT 1 FROM team_members tm JOIN team_projects tp ON tp.team_id=tm.team_id WHERE tm.user_id=u.id AND tp.project_id=?))))"""
         active_args = [port['id'], instant, instant, *([port['project_id']] * 5)]
-        current = store.one('SELECT COUNT(*) AS n FROM bindings b WHERE ' + active +
-                            ' AND b.fingerprint=? AND ' + identity_scope,
-                            [*active_args, fingerprint, *identity_args])['n']
+        bindings = store.all('SELECT b.* FROM bindings b WHERE ' + active + ' AND ' + identity_scope,
+                             [*active_args, *identity_args])
+        current, stale_principals, fresh_principals = 0, set(), set()
+        for binding in bindings:
+            key = store.one('SELECT * FROM api_keys WHERE id=?', (binding['principal'],))
+            account = store.one('SELECT * FROM users WHERE id=?', (binding['principal'],)) if not key else None
+            actor = {'id': binding['principal'], 'kind': 'key' if key else 'user',
+                     'role': 'consumer' if key else account['role'], **({'key': key} if key else {})}
+            try:
+                policy = gateway.policies.resolve(actor, port, None if key else binding['gateway_id'])
+            except HTTPException:
+                continue
+            matches = (binding['fingerprint'] == fingerprint and
+                       binding['gateway_id'] == (policy['id'] if policy else None) and
+                       binding['gateway_fingerprint'] == (policy['fingerprint'] if policy else None))
+            if matches:
+                current += 1
+                fresh_principals.add(binding['principal'])
+            else:
+                stale_principals.add(binding['principal'])
         # A newly negotiated binding resolves the notice for the same application identity.
-        stale = store.one('SELECT COUNT(DISTINCT b.principal) AS n FROM bindings b WHERE ' + active +
-                          ' AND b.fingerprint!=? AND ' + identity_scope +
-                          ' AND NOT EXISTS(SELECT 1 FROM bindings fresh WHERE fresh.principal=b.principal '
-                          'AND fresh.port_id=b.port_id AND fresh.fingerprint=? AND fresh.expires>?)',
-                          [*active_args, fingerprint, *identity_args, fingerprint, instant])['n']
+        stale = len(stale_principals - fresh_principals)
         deployments = store.all('SELECT d.*,c.enabled AS connection_enabled FROM deployments d '
                                 'JOIN connections c ON c.id=d.connection_id WHERE d.id IN (' +
                                 ','.join('?' for _ in port['deployments']) + ')', port['deployments'])
@@ -94,7 +109,8 @@ def mount(app):
             raise HTTPException(422, 'Use the project assigned to this service')
         with store.transaction():
             key = ctx['create_key'](ctx['KeyInput'](name=body.name, project_id=project_id,
-                                  allowed_ports=[port['id']], rpm=60, expires_days=90), p)
+                                  allowed_ports=[port['id']], rpm=60, expires_days=90,
+                                  gateway_id=body.gateway_id, team_id=body.team_id), p)
             credential = store.one('SELECT * FROM api_keys WHERE id=?', (key['id'],))
             principal = {'id': key['id'], 'kind': 'key', 'role': 'consumer', 'key': credential}
             binding = ctx['bind'](ctx['BindingInput'](service=port['name'], requirements=body.requirements,
