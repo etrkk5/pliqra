@@ -1,4 +1,4 @@
-# Roadmap delivery — 2.0
+# Roadmap delivery — 2.1
 
 The five engineering tracks previously listed as future scope are implemented in 2.0. Default installation remains endpoint-first, platform-independent and one container. The earlier roadmap was a scope boundary, not a tracked delivery plan; 2.0 ties each track to implementation, UI/API controls, tests and operating guides.
 
@@ -17,3 +17,7 @@ See the [delivery checklist](DELIVERY_PLAN.md) and [release validation](RELEASE.
 Entra/Okta customer tenants, actual Vault and NeMo deployments, intended real models and provider billing need environment-specific acceptance. Native APIs expose documented subsets and buffered native streaming. Third-party protocol attestation, ecosystem adoption and an industry-standard status cannot be delivered by implementing gateway code. The executable suite is available for those participants; none of their approval or adoption is claimed.
 
 Database failover infrastructure, model training/deployment, universal vendor API parity and autonomous production-quality rollout are outside the delivered product boundary. These are explicit limits, not completed checkboxes. See the corresponding guides before choosing a topology.
+
+## Multi-DC follow-through in 2.1
+
+Active/active gateways now have explicit sites/regions, shared strict request/token/concurrency admission, local model preference and placement constraints, per-site health/circuits, audited drain/standby controls, readiness/liveness probes and safe process rejoin after fencing. [Deployment and evidence](MULTI_DC.md) distinguish the tested local two-site environment from actual geographic/WAN and PostgreSQL promotion acceptance. Independent disconnected writers and offline quota grants are not part of this consistency-first mode.

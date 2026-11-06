@@ -72,7 +72,11 @@ docker run -d --name pliqra \
   -p 127.0.0.1:8088:8080 \
   -v modelport-data:/data \
   --add-host host.docker.internal:host-gateway \
-  --restart unless-stopped pliqra:2.0.0
+  --restart unless-stopped pliqra:2.1.0
 ```
 
 The volume name is an existing storage reference, not the product name. Do not run the old and new processes on the same volume simultaneously. Restore the pre-upgrade backup before returning to the old build.
+
+## Multi-DC operation
+
+For site identity, verified remote database TLS, multi-host writer selection, traffic drain, liveness/readiness and opt-in supervised restart after fencing, follow the [multi-DC guide](MULTI_DC.md). Site and model-location filters apply to totals, request history and CSV export. Preserve one writable authority and a common master key; independently writable database copies cannot enforce global quotas.

@@ -180,10 +180,10 @@ class PolicyEngine:
         column = {'key': 'key_id', 'user': 'user_id', 'project': 'project_id', 'team': 'team_id', 'service': 'port_id'}.get(rule['scope'])
         where, args = 'gateway_id=? AND started>?', [profile['id'], instant-rule['window_seconds']]
         if column:
-            where += ' AND '+column+' IS ?'
+            where += ' AND '+column+' IS NOT DISTINCT FROM ?'
             args.append(values.get(column))
         expression = 'COUNT(*)' if rule['metric'] == 'requests' else 'COALESCE(SUM(tokens),0)'
-        return self.store.one('SELECT '+expression+' AS n FROM gateway_requests WHERE '+where, args)['n']
+        return int(self.store.one('SELECT '+expression+' AS n FROM gateway_requests WHERE '+where, args)['n'])
 
     def admit(self, profile, event_id, principal, port, body, project_id, team_id, attempts):
         """Called inside the inference admission transaction; no quota race or second transaction."""
@@ -192,7 +192,7 @@ class PolicyEngine:
         latest = self.profile(profile['id'])
         if self.fingerprint(latest) != profile['fingerprint']:
             raise HTTPException(409, 'Gateway policy changed during admission; retry with the current contract')
-        instant = now()
+        instant = self.store.clock()
         config = profile['config']
         pending = self.store.one("SELECT COUNT(*) AS n FROM gateway_requests WHERE gateway_id=? AND status='pending'", (profile['id'],))['n']
         if pending >= config['max_concurrency']:

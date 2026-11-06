@@ -150,7 +150,7 @@ async def _run_operation(gateway,operation,body,principal,gateway_id=None,bindin
                 if chosen['provider'] not in ('openai','ollama') or chosen['provider']=='ollama' and operation!='embeddings':
                     raise HTTPException(422,'This adapter does not support the selected operation')
                 attempt_id=uid('attempt_')
-                store.insert('attempts',{'id':attempt_id,'event_id':event_id,'deployment_id':chosen['id'],'model':chosen['model'],'started':now(),'outcome':'pending'})
+                store.insert('attempts',{'id':attempt_id,'event_id':event_id,'deployment_id':chosen['id'],'model':chosen['model'],'model_site':chosen.get('site') or 'shared','started':store.clock(),'outcome':'pending'})
                 gateway.secrets.client=gateway.client
                 secret=await gateway.secrets.resolve(gateway.vault.decrypt(chosen['secret']))
                 auth=headers(secret,chosen['auth_header'],chosen['auth_prefix'])
@@ -198,11 +198,12 @@ async def _run_operation(gateway,operation,body,principal,gateway_id=None,bindin
                 envelope={'choices':[{'message':{'role':'assistant','content':result['text']}}]}
                 checked=await gateway.policies.check(policy,'output',normalized,gateway.client,event_id,response=envelope)
                 result={'text':checked['choices'][0]['message']['content']}
-            store.update('events',event_id,{'deployment_id':chosen['id'],'model':chosen['model'],'connection_name':chosen['connection_name']})
+            store.update('events',event_id,{'deployment_id':chosen['id'],'model':chosen['model'],'connection_name':chosen['connection_name'],'model_site':chosen.get('site') or 'shared'})
             gateway.finish(event_id,started,chosen,'success',accounting)
             gateway.mark_verified(chosen,CAPS[operation])
             gateway.capture_response(event_id,result if operation!='speech' else {'audio_bytes':len(binary),'format':body.get('response_format','mp3')})
-            response_headers={'X-Request-ID':event_id,'X-Pliqra-Model':chosen['model'],**({'X-Pliqra-Gateway':policy['id']} if policy else {})}
+            from .topology import model_headers
+            response_headers={**model_headers(gateway,chosen),'X-Request-ID':event_id,'X-Pliqra-Model':chosen['model'],**({'X-Pliqra-Gateway':policy['id']} if policy else {})}
             if operation=='speech':return Response(binary,media_type=CONTENT_TYPES[body.get('response_format','mp3')],headers=response_headers)
             if operation=='transcription' and body.get('response_format')=='text':return Response(result['text'],media_type='text/plain',headers=response_headers)
             return JSONResponse(result,headers=response_headers)

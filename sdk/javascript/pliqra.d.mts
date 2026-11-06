@@ -1,7 +1,8 @@
 export class PliqraError extends Error { status:number; detail:unknown; }
 export class ContractChanged extends PliqraError {}
 export type Message={role:'system'|'developer'|'user'|'assistant'|'tool'|'function';content?:unknown;[key:string]:unknown};
-export type Binding={id:string;service:string;fingerprint:string;expires:number;invoke:string;extensions:string[]};
+export type Placement={routing?:'local_first'|'local_only'|'anywhere';allowed_sites?:string[];allowed_regions?:string[]};
+export type Binding={id:string;service:string;fingerprint:string;expires:number;invoke:string;extensions:string[];placement?:Placement};
 export class Pliqra {
   constructor(baseURL:string,apiKey:string,options?:{fetch?:typeof fetch;timeout?:number});
   request(path:string,body?:unknown,options?:{signal?:AbortSignal}):Promise<Response>;

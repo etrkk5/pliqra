@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from fastapi import HTTPException
 
 from .db import now, uid
+from .topology import RuntimeTopology
 
 NODE_TIMEOUT=60
 
@@ -15,9 +16,14 @@ class Cluster:
         self.store=store
         self.node=uid('node_')
         self.fenced=False
+        self.topology=getattr(store,'runtime_topology',None) or RuntimeTopology.from_env()
         with store.transaction():
             self.reap()
-            store.insert('runtime_nodes',{'id':self.node,'heartbeat':now()})
+            site=store.one('SELECT * FROM sites WHERE id=?',(self.topology.site,))
+            if site and site['region']!=self.topology.region:raise RuntimeError('Site region differs from the registered topology')
+            if not site:store.insert('sites',{'id':self.topology.site,'region':self.topology.region,'mode':'active','updated':store.clock()})
+            store.insert('runtime_nodes',{'id':self.node,'heartbeat':store.clock(),'site':self.topology.site,'region':self.topology.region})
+        if store.backend=='postgresql':store.run("SELECT set_config('application_name',?,false)",('pliqra:'+self.topology.site+':'+self.node,))
         store.connection_failure=self.fence
 
     def fence(self):
@@ -25,7 +31,7 @@ class Cluster:
 
     def reap(self):
         store=self.store
-        stale=store.all('SELECT id FROM runtime_nodes WHERE heartbeat<?',(now()-NODE_TIMEOUT,))
+        stale=store.all('SELECT id FROM runtime_nodes WHERE heartbeat<?',(store.clock()-NODE_TIMEOUT,))
         for row in stale:
             node=row['id']
             store.run("UPDATE attempts SET outcome='interrupted',finished=? WHERE outcome='pending' AND event_id IN (SELECT id FROM events WHERE node_id=? AND status='pending')",(now(),node))
@@ -39,13 +45,21 @@ class Cluster:
 
     def ensure_live(self):
         row=self.store.one('SELECT heartbeat FROM runtime_nodes WHERE id=?',(self.node,))
-        if self.fenced or not row or row['heartbeat']<now()-NODE_TIMEOUT:
+        if self.fenced or not row or row['heartbeat']<self.store.clock()-NODE_TIMEOUT:
             self.fenced=True
             raise HTTPException(503,'Replica lease expired; restart this replica before serving requests')
+
+    def ensure_serving(self):
+        self.ensure_live()
+        site=self.store.one('SELECT mode FROM sites WHERE id=?',(self.topology.site,))
+        if not site or site['mode']!='active':raise HTTPException(503,'Site is draining or on standby; send new requests to another active site',headers={'Retry-After':'5'})
+        if self.store.setting('maintenance',False):raise HTTPException(503,'Workspace maintenance is in progress')
+        if not self.store.setting('organization_enabled',True):raise HTTPException(503,'Organization access is disabled')
 
     def acquire(self,kind):
         with self.store.transaction():
             self.ensure_live()
+            if kind=='inference':self.ensure_serving()
             self.reap()
             if not self.store.setting('organization_enabled',True):raise HTTPException(403,'Organization access is disabled')
             if self.store.setting('maintenance',False):raise HTTPException(503,'Workspace maintenance is in progress')
@@ -73,7 +87,7 @@ class Cluster:
             try:
                 with self.store.transaction():
                     self.ensure_live()
-                    self.store.run('UPDATE runtime_nodes SET heartbeat=? WHERE id=?',(now(),self.node))
+                    self.store.run('UPDATE runtime_nodes SET heartbeat=? WHERE id=?',(self.store.clock(),self.node))
                     self.reap()
             except HTTPException:
                 self.fenced=True
@@ -89,3 +103,12 @@ class Cluster:
                 self.store.run('UPDATE runtime_nodes SET heartbeat=0 WHERE id=?',(self.node,))
                 self.reap()
         except psycopg.OperationalError:pass
+
+
+async def restart_when_fenced(cluster):
+    """Opt-in for a process managed by a container/orchestrator restart policy."""
+    import os
+    import signal
+    while not cluster.fenced:await asyncio.sleep(1)
+    # A fresh process cannot retain old provider IO or adopt another process's leases.
+    os.kill(os.getpid(),signal.SIGTERM)

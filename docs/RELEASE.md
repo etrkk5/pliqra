@@ -1,43 +1,41 @@
-# Pliqra 2.0.0 — validation and boundaries
+# Pliqra 2.1.0 — active/active multi-DC validation
 
-Validated 6 November 2026. This record separates implemented behavior, real local interoperability and synthetic provider fixtures. The [1.2 record](RELEASE_1_2.md) is preserved as history.
+Validated 6 November 2026. The [2.0 validation record](RELEASE_2_0.md) and [1.2 record](RELEASE_1_2.md) remain available as history. The deployment contract, including infrastructure responsibilities, is in [MULTI_DC.md](MULTI_DC.md).
 
-## Delivered scope
+## Delivered behavior
 
-The [roadmap delivery table](ROADMAP.md) now links every engineering track to code, console/API controls, tests and an operating guide. Default installation remains one Docker image with SQLite. The optional topology adds PostgreSQL, shared-state replicas, distributed admission, independent organizations and metadata analytics. Model operations, stateless native interfaces, prompts, batches, external judges, gated canaries, identity/secrets and language clients are included.
+- Active gateway sites share one writable PostgreSQL authority for request/token quotas, concurrency, policies, identities and usage. Database time governs admission windows and node leases.
+- Typed service placement supports local preference, local-only routing and allowed model sites/regions. Constraints apply to fallback, canary and cached model selection, participate in fingerprints and can be negotiated as `pliqra.placement/1`.
+- Health observations and circuit breakers are isolated by observing site. A failed path in one DC does not poison another DC's reachability.
+- Versioned, audited active/draining/standby controls are available in the console and API. Admitted calls finish during drain; new calls and selection of models at that site stop.
+- Separate liveness/readiness probes and opt-in supervised restart let fenced gateways rejoin with a fresh process/node identity. Started inference is never automatically replayed.
+- Ingress/model-site filters, CSV fields, detailed events and per-attempt model locations make routing visible to administrators. TypeScript and Go binding types expose placement metadata.
 
-## Automated validation
+The default stays one platform-independent Docker image with SQLite. Optional [multi-DC Compose](../compose.multidc.yaml) runs separately in each DC against your existing verified-TLS PostgreSQL HA service. It does not provision independent writers or a global traffic manager.
 
-- **140 Python tests pass** on host Python 3.14 and Linux/Python 3.13 in the final Docker image, each with a real PostgreSQL 18 instance. The suite includes seven real database/replica cases; without a database URL those seven integration cases explicitly skip.
-- JavaScript client: **8 checks pass**, including fragmented Unicode SSE, incomplete streams, contract changes, extension negotiation, local-path enforcement and operation transport.
-- Go client: **2 tests pass**, including discovery/binding/streaming and contract/error boundaries.
-- The independent **pliqra-core/1** executable profile passes **9 checks against each** of Pliqra and the separate standard-library reference server over real local HTTP. Provider outputs are synthetic. Reports: [gateway](evidence/gateway-core.json), [reference](evidence/reference-core.json).
-- JavaScript/Node 22 and Go 1.25 also passed discovery, binding, completion and terminal streaming against the running synthetic gateway over real HTTP ([record](evidence/language-clients.json)).
-- CI runs Python 3.13/3.14, real PostgreSQL integration, JavaScript/Go and a fresh default Docker workspace. Python source compilation and console JavaScript parsing pass.
-- Dependency deprecation warnings remain in Authlib/httpx and SAML tooling. No failing assertion is suppressed.
+## Automated evidence
 
-Regression coverage includes shared request/concurrency admission across replicas; fencing/reconnect; encrypted atomic restore with rollback; metadata upsert after reconciliation; organization/account/session isolation; versioned prompts and durable restart; batch authorization/encryption; changed/failed quality evidence; canary allocation/promotion/rollback; native routes sharing guardrails/quotas; vector/audio boundaries; signed workload identity and replay; secret rotation/prefix restrictions; signed SAML logout and SCIM enterprise provisioning.
+**159 Python tests pass** on host Python 3.14 with real PostgreSQL, including **23 PostgreSQL integration cases** (16 multi-DC and seven existing storage/scale cases). Without the test database URL, those integration cases skip explicitly. The Linux/Python 3.13 Docker suite exercises the same tests. JavaScript and Go client checks remain part of CI.
 
-## Real local integrations
+The new cases cover concurrent global request admission; pending token reservations in gateway/key/user/project/team/service scopes; global concurrency; local model selection; drain while an admitted call runs; per-site health/circuits; strict placement and canary boundaries; database-clock admission; multi-host writable selection; manual endpoint recovery without discovery; and isolated storage-connection loss. Unit cases additionally reject SQLite/unverified remote databases in multi-DC mode and check placement/traffic-mode contract behavior.
 
-**Keycloak 26.8.2** ran in a disposable realm over HTTPS using an explicitly trusted local CA, with certificate and hostname verification enabled. Discovery, PKCE S256, nonce, signed ID-token login, safe viewer role and callback replay rejection passed. [Machine-readable record](evidence/keycloak-26.8.2.json). Custom CA support was added without disabling certificate verification.
+These tests caught and corrected PostgreSQL token-quota edge cases: numeric aggregate values must be normalized before JSON error serialization, and nullable quota scopes require portable null-safe equality. Candidate and contract-inventory reads were batched to avoid per-model WAN round trips.
 
-**Caddy + two gateway containers + PostgreSQL 18** passed fresh setup, shared authenticated sessions over 20 requests, both-replica status, synthetic upstream invocation and populated onboarding/API views. After one gateway was stopped and active health checks converged, 20 subsequent metadata requests succeeded through the survivor. Proxy inference retries are disabled. This does not establish in-flight request recovery or database failover. [Record](evidence/two-replica-topology.json).
+No assertion is suppressed. Existing Authlib/httpx and SAML deprecation warnings remain.
 
-The default non-root Docker image starts from an empty workspace and exposes health/discovery/initial setup and all client downloads ([record](evidence/fresh-docker.json)). Linux/Python 3.13 runs the same test suite with real PostgreSQL. Separate test storage and ports were used; the existing user workspace was never started or seeded.
+## Real container acceptance
 
-## Console acceptance
+Two actual gateway containers and two synthetic HTTP model endpoints used a real PostgreSQL 18 instance on one local host. Shared sessions, local selection from both sites, draining one site while the other served, and termination of one gateway's database connection passed. The fenced gateway terminated gracefully and its configured container policy restarted it with a fresh node identity; authenticated access and inference then resumed. [Machine-readable record](evidence/multidc-container.json).
 
-The charcoal/orange console was checked in a separate synthetic workspace: Model lab embedding execution; result/download/request inspection; prompt selection/render/run; batch creation and completed item inspection; quality release/judge views; workload trust form; organization/secret/analytics/directory tabs; SDK links and shared runtime controls. Existing admin totals/team drill-downs, gateway policies and guardrail flows remain covered by the earlier record and regression tests. [Screenshots and tour](CONSOLE.md).
+The console was checked against this separate synthetic workspace: both active data centers and live replicas, traffic-mode controls, model-location selection and model-placement forms. Ingress/model-site request filters and details use the same API. The English interface and charcoal/orange styling remain. No existing user workspace was started or seeded.
 
-## Practical limits
+## Acceptance boundaries
 
-- SQLite is one process per volume. PostgreSQL serializes workspace writes with one schema lock; production capacity and database HA require operator testing. Replica fencing relies on synchronized clocks and a 60-second lease timeout.
-- Organizations have separate application accounts/storage/key contexts but share the host/runtime trust domain. Root administrators manage the directory; their accounts do not inherit organization data access. Up to 50 organizations per root.
-- Native Responses/Anthropic/Ollama interfaces are documented **subsets**. Native SSE is buffered and labeled; no server-managed conversations or arbitrary provider tools. Audio is bounded at 32 MB; response-header validation is not acoustic quality validation.
-- Portable logical archives are bounded at 32 MB plaintext; online physical SQLite backup is bounded at 32 MB database size. Larger workspaces require native backups. Each organization is a separate recovery unit. PostgreSQL restore requires the matching master key/schema version.
-- Batches support 500 items and 100 queued jobs. Unstarted work can resume; started inference is never automatically replayed. Saved outputs require explicit deletion. Provider cancellation is best effort.
-- Canary gates check recorded task evidence at publication/advance. They do not autonomously certify production quality. Token/cost estimates are not provider invoices; unknown usage stays visible/reserved. Analytics retention is independent from source retention.
-- Entra/Okta customer tenants, actual Vault/NeMo deployments and intended real models still require environment-specific acceptance. Vendor profile/adapter fixtures do not constitute certification. No third-party protocol attestation, ecosystem adoption or industry-standard status is claimed.
+- The container exercise simulates two sites on one host. Geographically separate DCs, WAN failure/latency, real model capacity and PostgreSQL primary promotion require deployment acceptance.
+- Exact quota continuity depends on **one writer preserving acknowledged state**. The database platform owns replication, promotion, former-primary fencing and durability. Asynchronous replication may lose recent quota/policy records during promotion. Multi-host connection selection is not leader election.
+- Disconnected gateways stop admitting calls. There are no offline quota allowances, independent writable DC copies or inference replay. Unknown usage remains reserved until reconciled or its documented window expires.
+- No production RTO/RPO, capacity or availability SLO is claimed. Shared database latency and serialized workspace writes affect throughput.
+- Model location labels are administrator declarations. Routing constraints do not certify physical/legal residency of databases, guards, judges, analytics, identities or backups.
+- Previously documented native API subsets, buffered native streaming, batch/archive limits and real-vendor acceptance boundaries remain. The prior Keycloak evidence is from the 2.0 validation; it was not presented as a new 2.1 vendor certification.
 
-See [deployment](PLATFORM.md), [interfaces](MODEL_INTERFACES.md), [identity matrix](IDENTITY_COMPATIBILITY.md) and [workflows](WORKFLOWS.md) before production rollout.
+2.1 uses schema **5**, inference contract revision **4** and wire protocol draft **0.1**. Stop old replicas, back up, upgrade every site and renew application bindings. See [the upgrade procedure](MULTI_DC.md#evidence-and-upgrade).

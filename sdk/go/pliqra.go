@@ -33,12 +33,13 @@ type Metadata struct {
 	Bind      string `json:"bind"`
 }
 type Binding struct {
-	ID          string   `json:"id"`
-	Service     string   `json:"service"`
-	Fingerprint string   `json:"fingerprint"`
-	Expires     float64  `json:"expires"`
-	Invoke      string   `json:"invoke"`
-	Extensions  []string `json:"extensions"`
+	Placement   map[string]any `json:"placement,omitempty"`
+	ID          string         `json:"id"`
+	Service     string         `json:"service"`
+	Fingerprint string         `json:"fingerprint"`
+	Expires     float64        `json:"expires"`
+	Invoke      string         `json:"invoke"`
+	Extensions  []string       `json:"extensions"`
 }
 type Connection struct {
 	Client  *Client

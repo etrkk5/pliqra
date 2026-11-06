@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .storage_schema import BASE_SCHEMA
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def uid(prefix=""):
@@ -82,7 +82,7 @@ class SQLiteStore:
 
     def migrate(self):
         additions = {
-            "connections": {"enabled": "INTEGER NOT NULL DEFAULT 1", "health_interval": "INTEGER NOT NULL DEFAULT 300", "manual_model": "TEXT NOT NULL DEFAULT ''", "auth_header": "TEXT NOT NULL DEFAULT 'Authorization'", "auth_prefix": "TEXT NOT NULL DEFAULT 'Bearer'"},
+            "connections": {"enabled": "INTEGER NOT NULL DEFAULT 1", "health_interval": "INTEGER NOT NULL DEFAULT 300", "manual_model": "TEXT NOT NULL DEFAULT ''", "auth_header": "TEXT NOT NULL DEFAULT 'Authorization'", "auth_prefix": "TEXT NOT NULL DEFAULT 'Bearer'", "site":"TEXT NOT NULL DEFAULT ''", "region":"TEXT NOT NULL DEFAULT ''"},
             "deployments": {"metadata_hash": "TEXT NOT NULL DEFAULT ''", "available": "INTEGER NOT NULL DEFAULT 1", "failure_count": "INTEGER NOT NULL DEFAULT 0", "open_until": "REAL NOT NULL DEFAULT 0", "verified_at": "REAL"},
             "ports": {"project_id": "TEXT", "verified_only": "INTEGER NOT NULL DEFAULT 0", "cache_ttl": "INTEGER NOT NULL DEFAULT 0", "max_input_chars": "INTEGER NOT NULL DEFAULT 200000", "max_output_tokens": "INTEGER NOT NULL DEFAULT 32768", "log_content": "INTEGER NOT NULL DEFAULT 0"},
             "projects": {"max_concurrency": "INTEGER NOT NULL DEFAULT 20"},
@@ -99,6 +99,8 @@ class SQLiteStore:
         additions['sessions']={'federation_context':"TEXT NOT NULL DEFAULT '{}'"}
         additions['events'].update(prompt_id='TEXT',prompt_version='INTEGER')
         additions['events']['updated']='REAL NOT NULL DEFAULT 0'
+        additions['events'].update(ingress_site='TEXT',model_site='TEXT')
+        additions['ports']['placement']="TEXT NOT NULL DEFAULT '{}'"
         with self.transaction():
             for table, columns in additions.items():
                 existing = set(self.columns(table))
@@ -107,6 +109,9 @@ class SQLiteStore:
                         self.run(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
             for statement in [
                 "CREATE TABLE IF NOT EXISTS runtime_nodes (id TEXT PRIMARY KEY,heartbeat REAL NOT NULL)",
+                "CREATE TABLE IF NOT EXISTS sites (id TEXT PRIMARY KEY,region TEXT NOT NULL,mode TEXT NOT NULL DEFAULT 'active',version INTEGER NOT NULL DEFAULT 1,updated REAL NOT NULL)",
+                "CREATE TABLE IF NOT EXISTS deployment_health (site TEXT NOT NULL,deployment_id TEXT NOT NULL,available INTEGER NOT NULL DEFAULT 1,failure_count INTEGER NOT NULL DEFAULT 0,open_until REAL NOT NULL DEFAULT 0,updated REAL NOT NULL,PRIMARY KEY(site,deployment_id))",
+                "CREATE TABLE IF NOT EXISTS connection_health (site TEXT NOT NULL,connection_id TEXT NOT NULL,status TEXT NOT NULL,last_checked REAL NOT NULL,last_error TEXT,PRIMARY KEY(site,connection_id))",
                 "CREATE TABLE IF NOT EXISTS organizations (id TEXT PRIMARY KEY,slug TEXT NOT NULL UNIQUE,name TEXT NOT NULL,state TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,created REAL NOT NULL)",
                 "CREATE TABLE IF NOT EXISTS secret_providers (id TEXT PRIMARY KEY,name TEXT NOT NULL,kind TEXT NOT NULL,config TEXT NOT NULL,secret TEXT NOT NULL DEFAULT '',enabled INTEGER NOT NULL DEFAULT 1,version INTEGER NOT NULL DEFAULT 1,created REAL NOT NULL)",
                 "CREATE TABLE IF NOT EXISTS workload_providers (id TEXT PRIMARY KEY,name TEXT NOT NULL,config TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,version INTEGER NOT NULL DEFAULT 1,created REAL NOT NULL)",
@@ -154,10 +159,13 @@ class SQLiteStore:
                 "CREATE TABLE IF NOT EXISTS saml_assertions (id TEXT PRIMARY KEY,expires REAL NOT NULL)",
             ]:
                 self.run(statement)
+            if 'model_site' not in self.columns('attempts'):self.run('ALTER TABLE attempts ADD COLUMN model_site TEXT')
             existing=set(self.columns('saml_flows'))
             for name,definition in {'kind':"TEXT NOT NULL DEFAULT 'login'",'user_id':'TEXT'}.items():
                 if name not in existing:self.run(f'ALTER TABLE saml_flows ADD COLUMN {name} {definition}')
             existing=set(self.columns('evaluations'))
+            for name,definition in {'site':"TEXT NOT NULL DEFAULT 'local'",'region':"TEXT NOT NULL DEFAULT 'local'"}.items():
+                if name not in self.columns('runtime_nodes'):self.run(f'ALTER TABLE runtime_nodes ADD COLUMN {name} {definition}')
             for name,definition in {'node_id':'TEXT','cancel_requested':'INTEGER NOT NULL DEFAULT 0','dataset_hash':'TEXT','judge_id':'TEXT','min_judge_score':'REAL'}.items():
                 if name not in existing:self.run(f'ALTER TABLE evaluations ADD COLUMN {name} {definition}')
             self.set_schema_version(SCHEMA_VERSION)

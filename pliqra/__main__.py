@@ -18,7 +18,7 @@ def main():
         certificate=env('PLIQRA_TLS_CERTFILE')
         private_key=env('PLIQRA_TLS_KEYFILE')
         if bool(certificate)!=bool(private_key):parser.error('Set both PLIQRA_TLS_CERTFILE and PLIQRA_TLS_KEYFILE')
-        uvicorn.run('pliqra.main:create_app',factory=True,host=env('PLIQRA_HOST','0.0.0.0'),port=int(env('PLIQRA_PORT','8080')),proxy_headers=False,access_log=False,ssl_certfile=certificate,ssl_keyfile=private_key)
+        uvicorn.run('pliqra.main:create_app',factory=True,host=env('PLIQRA_HOST','0.0.0.0'),port=int(env('PLIQRA_PORT','8080')),proxy_headers=False,access_log=False,timeout_graceful_shutdown=30,ssl_certfile=certificate,ssl_keyfile=private_key)
         return
     from .db import Store
     from .security import Vault,hash_password

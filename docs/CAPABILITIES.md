@@ -44,3 +44,7 @@ For automation, `GET /api/v1/getting-started?service_id=...` exposes the same sc
 | Extension negotiation / SDKs | `/protocol/v1/bindings`, `/sdk/*` | Application connection; Settings & API |
 
 Detailed request schemas are available from the running instance's OpenAPI `/openapi.json`. See the [roadmap delivery](ROADMAP.md) for implementation and external acceptance boundaries.
+
+## 2.1 multi-DC controls
+
+`/api/v1/sites` and `/api/v1/sites/{id}/mode` match **Workspace & identity → Data centers**. Connections expose model site/region; service `placement` configures local preference and allowed locations. Reporting, CSV and request details include ingress/model sites, including each attempted model location. `/livez` and `/readyz` distinguish process liveness from safe admission. See [deployment, APIs and limitations](MULTI_DC.md).

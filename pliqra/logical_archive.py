@@ -11,7 +11,7 @@ from fastapi import HTTPException
 from .db import SCHEMA_VERSION, encode, now
 from .security import ENCRYPTED_COLUMNS
 
-EXCLUDED={'runtime_nodes','runtime_leases','schema_metadata'}
+EXCLUDED={'runtime_nodes','runtime_leases','schema_metadata','deployment_health','connection_health'}
 
 
 def archive_key(password,salt):

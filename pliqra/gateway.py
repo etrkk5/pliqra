@@ -20,6 +20,7 @@ from .access import service_allowed, require_project, current_principal
 from .policies import PolicyEngine, reservation_units
 from .cluster import Cluster
 from .secrets import SecretResolver
+from .topology import Placement,placement_reason,runtime_health,observe_deployment,model_headers
 
 
 CAPABILITIES = {"chat", "streaming", "tools", "structured_output", "vision", "embeddings", "audio_speech", "audio_transcription"}
@@ -36,7 +37,7 @@ class AdmissionSnapshot:
 def decoded_port(row):
     if not row:
         return None
-    return {**row, "deployments": json.loads(row["deployments"]), "requirements": json.loads(row["requirements"]), "enabled": bool(row["enabled"])}
+    return {**row, "deployments": json.loads(row["deployments"]), "requirements": json.loads(row["requirements"]), "enabled": bool(row["enabled"]),"placement":Placement.model_validate(json.loads(row.get("placement") or "{}")).model_dump()}
 
 
 def decoded_deployment(row):
@@ -103,8 +104,13 @@ class Gateway:
     def candidates(self, port, required=None, _rollout=True):
         requirements = set(port["requirements"]) | set(required or [])
         candidates, decisions = [], []
-        for deployment_id in port["deployments"]:
-            row = self.store.one("SELECT d.*,c.name AS connection_name,c.endpoint,c.provider,c.secret,c.enabled AS connection_enabled,c.auth_header,c.auth_prefix FROM deployments d JOIN connections c ON c.id=d.connection_id WHERE d.id=?", (deployment_id,))
+        ids=port['deployments']
+        rows=self.store.all("SELECT d.*,c.name AS connection_name,c.endpoint,c.provider,c.secret,c.enabled AS connection_enabled,c.auth_header,c.auth_prefix,c.site,c.region,h.available AS observed_available,h.open_until AS observed_open_until FROM deployments d JOIN connections c ON c.id=d.connection_id LEFT JOIN deployment_health h ON h.deployment_id=d.id AND h.site=? WHERE d.id IN ("+','.join('?' for _ in ids)+")",(self.cluster.topology.site,*ids)) if ids else []
+        inventory={row['id']:row for row in rows}
+        modes={row['id']:row['mode'] for row in self.store.all('SELECT id,mode FROM sites')}
+        instant=self.store.clock()
+        for deployment_id in ids:
+            row=inventory.get(deployment_id)
             if not row:
                 decisions.append({"deployment_id": deployment_id, "eligible": False, "reason": "Deployment no longer exists"})
                 continue
@@ -112,16 +118,24 @@ class Gateway:
             evidence=deployment["verified"] if port.get("verified_only") else deployment["capabilities"]
             missing = sorted(requirements - set(evidence))
             disabled=not deployment["enabled"] or not deployment["connection_enabled"]
-            unavailable=not deployment["available"] or deployment["open_until"]>now()
+            available=deployment['observed_available'] if deployment['observed_available'] is not None else 1
+            open_until=deployment['observed_open_until'] or 0
+            if not self.cluster.topology.multi_dc:available,open_until=deployment['available'],deployment['open_until']
+            unavailable=not available or open_until>instant
+            placement=port.get('placement') or {}
+            location_error=placement_reason(deployment,placement,self.cluster.topology)
+            if deployment.get('site') and modes.get(deployment['site'])!='active':location_error='Model site is unavailable, draining or on standby'
             reason = "Deployment or connection is disabled" if disabled else ("Temporarily unavailable; circuit breaker or inventory check" if unavailable else ("Missing required verified capabilities: " + ", ".join(missing) if missing and port.get("verified_only") else "Missing required capabilities: " + ", ".join(missing) if missing else "Meets all required capabilities"))
-            eligible = not disabled and not unavailable and not missing and port["enabled"]
-            decisions.append({"deployment_id": deployment_id, "model": deployment["model"], "connection": deployment["connection_name"], "eligible": bool(eligible), "reason": reason if port["enabled"] else "AI service is disabled"})
+            eligible = not disabled and not unavailable and not missing and not location_error and port["enabled"]
+            decisions.append({"deployment_id": deployment_id, "model": deployment["model"], "connection": deployment["connection_name"], "eligible": bool(eligible), "reason": (location_error or reason) if port["enabled"] else "AI service is disabled","ingress_site":self.cluster.topology.site,"model_site":deployment.get("site") or "shared","model_region":deployment.get("region") or "unspecified"})
             if eligible:
                 candidates.append(deployment)
         if port["strategy"] == "round_robin" and len(candidates) > 1:
             count = self.store.setting('round_robin:'+port['id'],0)
             offset = count % len(candidates)
             candidates = candidates[offset:] + candidates[:offset]
+        if (port.get('placement') or {}).get('routing','local_first')=='local_first':
+            candidates.sort(key=lambda d:0 if d.get('site')==self.cluster.topology.site else 1 if not d.get('site') else 2)
         if _rollout:
             from .quality import active_release
             release=active_release(self.store,port['id'])
@@ -131,16 +145,22 @@ class Gateway:
                 if self.base_fingerprint(self.port(port['id']))!=config['stable_fingerprint'] or self.base_fingerprint(candidate)!=config['candidate_fingerprint']:
                     return [],decisions+[{'eligible':False,'reason':'Release evidence is stale; roll back and evaluate the changed services'}]
                 other,trail=self.candidates({**candidate,'verified_only':candidate.get('verified_only') or port.get('verified_only')},required,_rollout=False)
+                allowed=[]
+                for item in other:
+                    boundary=placement_reason(item,port.get('placement') or {},self.cluster.topology)
+                    if boundary:trail.append({'deployment_id':item['id'],'eligible':False,'reason':boundary})
+                    else:allowed.append(item)
+                other=allowed
                 candidates=[{**d,'rollout_lane':'stable','release_id':release['id']} for d in candidates]+[{**d,'rollout_lane':'canary','release_id':release['id']} for d in other]
                 decisions+=trail
         return candidates, decisions
 
     def base_fingerprint(self, port):
-        deployments = []
-        for record_id in port["deployments"]:
-            row = self.store.one("SELECT d.id,d.model,d.capabilities,d.enabled,d.input_price,d.output_price,d.metadata_hash,c.endpoint,c.provider,c.enabled AS connection_enabled,c.auth_header,c.auth_prefix FROM deployments d JOIN connections c ON c.id=d.connection_id WHERE d.id=?", (record_id,))
-            deployments.append(row)
-        content = {"name": port["name"], "version": port["version"], "enabled": port["enabled"], "requirements": port["requirements"], "strategy": port["strategy"], "log_content":port.get("log_content",0),"project_id":port.get("project_id"),"verified_only":port.get("verified_only",0),"cache_ttl":port.get("cache_ttl",0),"max_input_chars":port.get("max_input_chars",200000),"max_output_tokens":port.get("max_output_tokens",32768),"deployments": deployments}
+        ids=port['deployments']
+        rows=self.store.all("SELECT d.id,d.model,d.capabilities,d.enabled,d.input_price,d.output_price,d.metadata_hash,c.endpoint,c.provider,c.enabled AS connection_enabled,c.auth_header,c.auth_prefix,c.site,c.region FROM deployments d JOIN connections c ON c.id=d.connection_id WHERE d.id IN ("+','.join('?' for _ in ids)+")",ids) if ids else []
+        inventory={row['id']:row for row in rows}
+        deployments=[inventory.get(record_id) for record_id in ids]
+        content = {"name": port["name"], "version": port["version"], "enabled": port["enabled"], "requirements": port["requirements"], "strategy": port["strategy"], "log_content":port.get("log_content",0),"project_id":port.get("project_id"),"verified_only":port.get("verified_only",0),"cache_ttl":port.get("cache_ttl",0),"max_input_chars":port.get("max_input_chars",200000),"max_output_tokens":port.get("max_output_tokens",32768),"deployments": deployments,"placement":port.get("placement") or {}}
         content['contract_revision']=INFERENCE_CONTRACT_REVISION
         return hashlib.sha256(json.dumps(content,sort_keys=True,separators=(",",":")).encode()).hexdigest()
 
@@ -152,7 +172,7 @@ class Gateway:
 
     def manifest(self, port):
         candidates, decisions = self.candidates(port)
-        return {"protocol": "pliqra/0.1-draft", "contract_revision":INFERENCE_CONTRACT_REVISION, "id": port["id"], "name": port["name"], "description": port["description"], "version": port["version"], "fingerprint": self.fingerprint(port), "requirements": port["requirements"], "invocation": {"interface": "openai-chat-completions", "path": "/v1/chat/completions", "model": port["name"]}, "deployments": [{"model": item["model"], "capabilities": item["capabilities"], "verified": item["verified"], "evidence": "Declared capabilities; verified lists independently tested capabilities"} for item in candidates], "readiness": "ready" if candidates else "unavailable", "decisions": decisions}
+        return {"protocol": "pliqra/0.1-draft", "contract_revision":INFERENCE_CONTRACT_REVISION, "id": port["id"], "name": port["name"], "description": port["description"], "version": port["version"], "fingerprint": self.fingerprint(port), "requirements": port["requirements"],"placement":port.get("placement") or {}, "invocation": {"interface": "openai-chat-completions", "path": "/v1/chat/completions", "model": port["name"]}, "deployments": [{"model": item["model"],"site":item.get("site") or "shared","region":item.get("region") or "unspecified", "capabilities": item["capabilities"], "verified": item["verified"], "evidence": "Declared capabilities; verified lists independently tested capabilities"} for item in candidates], "readiness": "ready" if candidates else "unavailable", "decisions": decisions}
 
     def authorize_port(self, principal, port):
         if not service_allowed(self.store,principal,port):
@@ -160,9 +180,10 @@ class Gateway:
         self.policies.resolve(principal,port)
 
     def begin(self, principal, port, deployment, body, decisions, reservation_prices=None, kind='inference', attempt_limit=1, policy=None, delivery=None, admission=None,candidates=None):
-        event_id, started = uid('req_'), now()
+        event_id, started = uid('req_'), self.store.clock()
         with self.store.transaction():
-            self.cluster.ensure_live()
+            self.cluster.ensure_serving()
+            started=self.store.clock()
             if not self.store.setting('organization_enabled',True):raise HTTPException(403,'Organization access is disabled')
             principal=current_principal(self.store,principal)
             if body.get('_prompt_project_id'):require_project(self.store,principal,body['_prompt_project_id'])
@@ -217,12 +238,12 @@ class Gateway:
                     pricing=reservation_prices or deployment
                     if pricing['input_price'] is None or pricing['output_price'] is None:raise HTTPException(422,'This project has a budget. Configure input and output pricing before using this model.')
                     reserve=cost_micros(reservation_units(body),pricing)*attempt_limit
-                    month=datetime.now(timezone.utc).replace(day=1,hour=0,minute=0,second=0,microsecond=0).timestamp()
+                    month=datetime.fromtimestamp(started,timezone.utc).replace(day=1,hour=0,minute=0,second=0,microsecond=0).timestamp()
                     spent=self.store.one("SELECT COALESCE(SUM(CASE WHEN status='pending' THEN reserved_micros ELSE COALESCE(cost_micros,known_cost_micros+reserved_micros) END),0) AS n FROM events WHERE project_id=? AND started>=?",(project_id,month))['n']
                     if spent+reserve>project['monthly_budget']*1_000_000:raise HTTPException(402,"Project budget cannot cover this request's estimated reservation")
             self.policies.admit(policy,event_id,principal,port,body,project_id,team_id,attempt_limit)
             self.store.insert('events',{'id':event_id,'started':started,'principal':principal['id'],'actor_user_id':key.get('created_by') if key else principal['id'],'project_id':project_id,'team_id':team_id,'key_id':key['id'] if key else None,'port_id':port['id'],'port_name':port['name'],'port_version':port['version'],'deployment_id':deployment['id'],'model':deployment['model'],'connection_name':deployment['connection_name'],'status':'pending','stream':int(bool(body.get('stream'))),'reserved_micros':reserve,'decisions':encode(decisions),'request_kind':kind,'price_snapshot':encode({'input_price':deployment['input_price'],'output_price':deployment['output_price']}),'gateway_id':policy['id'] if policy else None,'gateway_name':policy['name'] if policy else None,'gateway_fingerprint':policy['fingerprint'] if policy else None,'delivery':delivery})
-            self.store.update('events',event_id,{'node_id':self.cluster.node})
+            self.store.update('events',event_id,{'node_id':self.cluster.node,'ingress_site':self.cluster.topology.site,'model_site':deployment.get('site') or 'shared'})
             if body.get('prompt'):self.store.update('events',event_id,{'prompt_id':body['prompt']['id'],'prompt_version':body['prompt']['version']})
             if deployment.get('release_id'):
                 self.store.set_setting('release_cursor:'+deployment['release_id'],self.store.setting('release_cursor:'+deployment['release_id'],0)+1)
@@ -249,7 +270,13 @@ class Gateway:
         usage=usage_of(data or {})
         with self.store.transaction():
             self.store.update('attempts',attempt_id,{'finished':now(),'outcome':outcome,'http_status':http_status,'input_tokens':usage[0],'output_tokens':usage[1],'cost_micros':cost_micros(usage,deployment)})
-            if outcome=='success':self.store.update('deployments',deployment['id'],{'failure_count':0,'open_until':0})
+            if self.cluster.topology.multi_dc:
+                current=runtime_health(self.store,self.cluster.topology.site,deployment['id']) or {'failure_count':0}
+                if outcome=='success':observe_deployment(self.store,self.cluster.topology.site,deployment['id'],available=1,failure_count=0,open_until=0)
+                elif outcome in ('connection_error','upstream_error','error','incomplete'):
+                    count=current['failure_count']+1
+                    observe_deployment(self.store,self.cluster.topology.site,deployment['id'],failure_count=count,open_until=self.store.clock()+30 if count>=3 else 0)
+            elif outcome=='success':self.store.update('deployments',deployment['id'],{'failure_count':0,'open_until':0})
             elif outcome in ('connection_error','upstream_error','error','incomplete'):
                 current=self.store.one('SELECT failure_count FROM deployments WHERE id=?',(deployment['id'],))
                 if current:
@@ -265,10 +292,10 @@ class Gateway:
         all_priced=bool(attempts) and all(a['cost_micros'] is not None for a in attempts)
         known_cost=sum(a['cost_micros'] or 0 for a in attempts)
         row=self.store.one('SELECT reserved_micros FROM events WHERE id=?',(event_id,))
-        fields={'status':status,'finished':now(),'latency_ms':(time.perf_counter()-started)*1000,'ttft_ms':ttft,'input_tokens':sum(a['input_tokens'] or 0 for a in attempts) if known else None,'output_tokens':sum(a['output_tokens'] or 0 for a in attempts) if known else None,'usage_source':'reported' if complete else 'partial' if known else 'unknown','cost_micros':known_cost if all_priced else None,'known_cost_micros':known_cost,'reserved_micros':0 if all_priced else max(0,(row['reserved_micros'] if row else 0)-known_cost),'error':error}
+        fields={'status':status,'finished':now(),'latency_ms':(time.perf_counter()-started)*1000,'ttft_ms':ttft,'input_tokens':sum(a['input_tokens'] or 0 for a in attempts) if known else None,'output_tokens':sum(a['output_tokens'] or 0 for a in attempts) if known else None,'usage_source':'reported' if complete else 'partial' if known else 'unknown','cost_micros':known_cost if all_priced else None,'known_cost_micros':known_cost,'reserved_micros':0 if all_priced else max(0,(row['reserved_micros'] if row else 0)-known_cost),'error':error,'model_site':deployment.get('site') or 'shared'}
         if not attempts:
             fields.update(input_tokens=0,output_tokens=0,usage_source='not_invoked',cost_micros=0,reserved_micros=0,
-                          deployment_id=None,model=None,connection_name=None)
+                          deployment_id=None,model=None,connection_name=None,model_site=None)
         with self.store.transaction():
             self.cluster.ensure_live()
             self.store.update('events',event_id,fields)
@@ -278,7 +305,7 @@ class Gateway:
         key=principal.get('key')
         identity=gateway_id or (key or {}).get('gateway_id')
         policy=self.store.one('SELECT id,name FROM gateway_profiles WHERE id=? OR slug=?',(identity,identity)) if identity else None
-        self.store.insert('events',{'id':uid('req_'),'started':now(),'finished':now(),'principal':principal['id'],'actor_user_id':key.get('created_by') if key else principal['id'],'key_id':key['id'] if key else None,'project_id':key['project_id'] if key else None,'team_id':key.get('team_id') if key else None,'port_name':str(body.get('model',''))[:256],'status':'rejected','stream':int(bool(body.get('stream'))),'cost_micros':0,'usage_source':'not_invoked','error':encode(error.detail) if isinstance(error.detail,dict) else str(error.detail),'decisions':encode([{'eligible':False,'reason':'Rejected before upstream inference','http_status':error.status_code}]),'gateway_id':policy['id'] if policy else None,'gateway_name':policy['name'] if policy else None})
+        self.store.insert('events',{'id':uid('req_'),'ingress_site':self.cluster.topology.site,'started':self.store.clock(),'finished':now(),'principal':principal['id'],'actor_user_id':key.get('created_by') if key else principal['id'],'key_id':key['id'] if key else None,'project_id':key['project_id'] if key else None,'team_id':key.get('team_id') if key else None,'port_name':str(body.get('model',''))[:256],'status':'rejected','stream':int(bool(body.get('stream'))),'cost_micros':0,'usage_source':'not_invoked','error':encode(error.detail) if isinstance(error.detail,dict) else str(error.detail),'decisions':encode([{'eligible':False,'reason':'Rejected before upstream inference','http_status':error.status_code}]),'gateway_id':policy['id'] if policy else None,'gateway_name':policy['name'] if policy else None})
 
     async def chat(self,body,principal,binding=None,request_kind='inference',gateway_id=None):
         try:
@@ -356,7 +383,7 @@ class Gateway:
         delivery=('guarded_buffer' if self.policies.buffered(policy) else 'adapter_buffer') if buffered else 'live_stream' if body.get('stream') else 'json'
         try:
             if not policy and not any(d.get('release_id') for d in candidates) and port.get('cache_ttl',0)>0 and not body.get('stream') and not requests_tools(body) and kind=='inference':
-                cache_id=hashlib.sha256((principal['id']+self.fingerprint(port)+json.dumps(body,sort_keys=True)).encode()).hexdigest()
+                cache_id=hashlib.sha256((principal['id']+self.cluster.topology.site+self.fingerprint(port)+json.dumps(body,sort_keys=True)).encode()).hexdigest()
                 cached=self.store.one('SELECT payload FROM cache_entries WHERE id=? AND expires>?',(cache_id,now()))
                 if cached:
                     packet=json.loads(self.vault.decrypt(cached['payload']))
@@ -370,7 +397,7 @@ class Gateway:
                     data['pliqra']={'cache_hit':True,'billable_tokens':0}
                     self.capture_response(event_id,data)
                     self.store.update('events',event_id,{'status':'success','finished':now(),'latency_ms':(time.perf_counter()-started)*1000,'usage_source':'cache','input_tokens':0,'output_tokens':0,'cost_micros':0,'cache_hit':1,'reserved_micros':0,'decisions':encode([{'selected':True,'reason':'Encrypted exact-response cache; no upstream call was made'}])})
-                    return JSONResponse(data,headers={'X-Request-ID':event_id,'X-Pliqra-Model':chosen['model'],'X-Pliqra-Cache':'HIT'})
+                    return JSONResponse(data,headers={'X-Request-ID':event_id,'X-Pliqra-Model':chosen['model'],'X-Pliqra-Cache':'HIT',**model_headers(self,chosen)})
             prices={field:max(item[field] for item in candidates) if all(item[field] is not None for item in candidates) else None for field in ('input_price','output_price')}
             event_id,_=self.begin(principal,port,chosen,body,decisions,prices,kind,len(candidates),policy,delivery,admission,candidates)
             chosen=candidates[0]
@@ -380,7 +407,7 @@ class Gateway:
             for deployment in candidates:
                 chosen=deployment
                 attempt_id=uid('attempt_')
-                self.store.insert('attempts',{'id':attempt_id,'event_id':event_id,'deployment_id':deployment['id'],'model':deployment['model'],'started':now(),'outcome':'pending'})
+                self.store.insert('attempts',{'id':attempt_id,'event_id':event_id,'deployment_id':deployment['id'],'model':deployment['model'],'model_site':deployment.get('site') or 'shared','started':self.store.clock(),'outcome':'pending'})
                 self.secrets.client=self.client
                 secret=await self.secrets.resolve(self.vault.decrypt(deployment['secret']))
                 url,payload,auth=upstream_request(deployment,upstream_body,deployment['model'],secret)
@@ -425,7 +452,7 @@ class Gateway:
                         async for chunk in self.stream(response,chosen,event_id,started):yield chunk
                     finally:release()
                 streaming=True
-                return StreamingResponse(iterator(),media_type='text/event-stream',headers={'X-Request-ID':event_id,'X-Pliqra-Model':chosen['model'],'X-Pliqra-Delivery':delivery,**({'X-Pliqra-Gateway':policy['id']} if policy else {}),'Cache-Control':'no-cache','X-Accel-Buffering':'no'},background=BackgroundTask(release))
+                return StreamingResponse(iterator(),media_type='text/event-stream',headers={'X-Request-ID':event_id,'X-Pliqra-Model':chosen['model'],'X-Pliqra-Delivery':delivery,**model_headers(self,chosen),**({'X-Pliqra-Gateway':policy['id']} if policy else {}),'Cache-Control':'no-cache','X-Accel-Buffering':'no'},background=BackgroundTask(release))
             data=await response_json(response)
             await response.aclose()
             if chosen['provider']=='ollama':data=ollama_result(data,event_id,chosen['model'])
@@ -443,7 +470,7 @@ class Gateway:
             if cache_id:
                 packet={'format':'pliqra/cache/1','deployment_id':chosen['id'],'response':data}
                 self.store.run('INSERT INTO cache_entries VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,expires=excluded.expires',(cache_id,port['id'],self.vault.encrypt(encode(packet)),now()+port['cache_ttl']))
-            headers={'X-Request-ID':event_id,'X-Pliqra-Model':chosen['model'],'X-Pliqra-Cache':'MISS','X-Pliqra-Delivery':delivery}
+            headers={'X-Request-ID':event_id,'X-Pliqra-Model':chosen['model'],'X-Pliqra-Cache':'MISS','X-Pliqra-Delivery':delivery,**model_headers(self,chosen)}
             if chosen.get('release_id'):headers['X-Pliqra-Lane']=chosen['rollout_lane']
             if policy:headers['X-Pliqra-Gateway']=policy['id']
             if buffered:

@@ -2,6 +2,7 @@
 from fastapi import HTTPException
 
 EXTENSIONS={
+    'pliqra.placement/1':{'description':'Site-aware model placement included in the accepted service contract','path':'/protocol/v1/services'},
     'pliqra.policy/1':{'description':'Named gateway policies and guardrail contracts','path':'/protocol/v1/gateway'},
     'pliqra.operations/1':{'description':'Bound embeddings, speech and transcription','path':'/protocol/v1/bindings/{id}/operations/{operation}'},
     'pliqra.prompts/1':{'description':'Explicit immutable prompt versions','path':'/api/v1/prompts'},

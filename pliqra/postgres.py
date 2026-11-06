@@ -33,9 +33,11 @@ class PostgresStore(SQLiteStore):
         self.directory=Path(directory)
         self.directory.mkdir(parents=True,exist_ok=True,mode=0o700)
         self.schema=schema
-        self.database_url=url
+        options=psycopg.conninfo.conninfo_to_dict(url)
+        if options.get('target_session_attrs','read-write')!='read-write':raise ValueError('The control database must use target_session_attrs=read-write')
+        self.database_url=psycopg.conninfo.make_conninfo(url,target_session_attrs='read-write')
         self.lock=threading.RLock()
-        self.conn=psycopg.connect(url,autocommit=True,row_factory=dict_row,connect_timeout=5)
+        self.conn=psycopg.connect(self.database_url,autocommit=True,row_factory=dict_row,connect_timeout=5)
         self.lock_id=int.from_bytes(hashlib.sha256(('pliqra:'+schema).encode()).digest()[:8],signed=True)
         self.conn.execute('SET lock_timeout TO \'10s\'')
         self.conn.execute('SET statement_timeout TO \'30s\'')
@@ -109,12 +111,19 @@ class PostgresStore(SQLiteStore):
             self.ensure_connection()
             try:
                 with self.conn.transaction():
-                    self.conn.execute('SELECT pg_advisory_xact_lock(%s)',(self.lock_id,))
+                    row=self.conn.execute("SELECT pg_advisory_xact_lock(%s),current_setting('transaction_read_only') AS read_only",(self.lock_id,)).fetchone()
+                    if row['read_only']=='on':raise psycopg.OperationalError('The control database is read-only')
                     yield self
             except psycopg.OperationalError:
                 self.conn.close()
                 if hasattr(self,'connection_failure'):self.connection_failure()
                 raise
+
+    def ensure_writable(self):
+        if self.one("SELECT current_setting('transaction_read_only') AS value")['value']=='on':
+            if hasattr(self,'connection_failure'):self.connection_failure()
+            from fastapi import HTTPException
+            raise HTTPException(503,'The control database is read-only; restore a single writable authority')
 
     def database_size(self):
         return self.one('SELECT COALESCE(SUM(pg_total_relation_size(c.oid)),0)::BIGINT AS bytes FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=?',(self.schema,))['bytes']

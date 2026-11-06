@@ -69,3 +69,11 @@ See [the gateway and guardrail guide](GATEWAYS.md) for configuration, APIs, arch
 ![Workload identity](screenshots/workspace-identity.png)
 
 These images use a separate disposable workspace with synthetic providers and example identities; no private workspace was seeded or published. See [workflow details](WORKFLOWS.md) and [identity compatibility](IDENTITY_COMPATIBILITY.md).
+
+## Active/active sites in 2.1
+
+**Workspace & identity → Data centers** shows live replicas and model leases per site, with versioned active/draining/standby controls. Endpoint forms assign model locations; service policies select local preference and allowed sites/regions. Request views and reports expose gateway/model sites.
+
+![Two active gateway sites sharing one authority](screenshots/multi-dc.png)
+
+The screenshot is from the disposable local two-site acceptance environment. See [multi-DC deployment and failure semantics](MULTI_DC.md).

@@ -1,0 +1,12 @@
+{
+  "local_model_selection_both_sites": "passed",
+  "shared_session": "passed",
+  "site_drain_and_surviving_site": "passed",
+  "connection_loss_fences_and_restarts_process": "passed",
+  "fresh_node_rejoins_shared_authority": "passed",
+  "environment": "Two real gateway containers and PostgreSQL 18 on one local host, with synthetic HTTP model servers",
+  "geographically_separate_dcs_tested": false,
+  "postgres_primary_promotion_tested": false,
+  "real_models_tested": false,
+  "inference_replay_enabled": false
+}

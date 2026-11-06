@@ -24,7 +24,12 @@ from .gateway import decoded_port
 from .security import digest, endpoint_url, hash_password, verify_password, validate_encryption
 
 
+from .topology import SiteID,observe_connection,observe_deployment
+
+
 class ConnectionPatch(BaseModel):
+    site:SiteID|Literal['']|None=None
+    region:SiteID|Literal['']|None=None
     name: Annotated[str, Field(min_length=1, max_length=100)]
     endpoint: Annotated[str, Field(max_length=2000)]
     provider: Literal["openai", "ollama", "responses", "anthropic"]
@@ -114,7 +119,7 @@ def restore_bytes(store, vault, archive, password):
     key = base64.urlsafe_b64encode(hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 600000))
     try:
         payload = json.loads(Fernet(key).decrypt(archive[25:]))
-        if payload["format"] not in ("pliqra-backup/1","modelport-backup/1") or payload["schema"] not in (2,3,SCHEMA_VERSION):
+        if payload["format"] not in ("pliqra-backup/1","modelport-backup/1") or payload["schema"] not in (2,3,4,SCHEMA_VERSION):
             raise ValueError()
         replacement = payload["key"].encode()
         Fernet(replacement)
@@ -129,7 +134,7 @@ def restore_bytes(store, vault, archive, password):
         path.write_bytes(raw)
         try:
             source = sqlite3.connect(path)
-            if source.execute("PRAGMA integrity_check").fetchone()[0] != "ok" or source.execute("PRAGMA user_version").fetchone()[0] not in (2,3,SCHEMA_VERSION):
+            if source.execute("PRAGMA integrity_check").fetchone()[0] != "ok" or source.execute("PRAGMA user_version").fetchone()[0] not in (2,3,4,SCHEMA_VERSION):
                 raise ValueError()
             if not source.execute("SELECT id FROM users WHERE role='admin' AND issuer='local' AND active=1").fetchone():
                 raise ValueError()
@@ -188,6 +193,7 @@ def restore_bytes(store, vault, archive, password):
 async def check_connection_health(app, record_id, actor="system"):
     store, vault = app.state.store, app.state.vault
     generation=app.state.gateway.generation
+    topology=app.state.gateway.cluster.topology
     row = store.one("SELECT * FROM connections WHERE id=?", (record_id,))
     if not row:
         raise HTTPException(404, "Connection not found")
@@ -195,7 +201,7 @@ async def check_connection_health(app, record_id, actor="system"):
         raise HTTPException(409, "Connection is disabled")
     def ensure_current():
         current=store.one('SELECT * FROM connections WHERE id=?',(record_id,))
-        fields=('endpoint','provider','secret','manual_model','auth_header','auth_prefix','enabled')
+        fields=('endpoint','provider','secret','manual_model','auth_header','auth_prefix','enabled','site','region')
         if generation!=app.state.gateway.generation or app.state.gateway.maintenance or not current or any(current[k]!=row[k] for k in fields):
             raise HTTPException(409,'Workspace or connection changed during the health check; retry')
     app.state.gateway.secrets.client=app.state.client
@@ -209,12 +215,18 @@ async def check_connection_health(app, record_id, actor="system"):
                     if response.status_code < 500 and response.status_code not in (401,403):
                         with store.transaction():
                             ensure_current()
+                            if topology.multi_dc:
+                                observe_connection(store,topology.site,record_id,'reachable','Model-list discovery unavailable')
+                                for item in store.all('SELECT id FROM deployments WHERE connection_id=?',(record_id,)):observe_deployment(store,topology.site,item['id'],available=1)
                             store.update("connections", record_id, {"status":"reachable", "last_checked":now(), "last_error":"HTTP endpoint reachable; model-list discovery unavailable"})
                         return {"provider":row["provider"],"models":[],"status":"reachable","inference_verified":False}
             except httpx.HTTPError:
                 pass
         with store.transaction():
             ensure_current()
+            if topology.multi_dc:
+                observe_connection(store,topology.site,record_id,'unreachable','Endpoint or credentials failed the health check')
+                for item in store.all('SELECT id FROM deployments WHERE connection_id=?',(record_id,)):observe_deployment(store,topology.site,item['id'],available=0)
             store.update("connections", record_id, {"status":"unreachable", "last_checked":now(), "last_error":"Endpoint or credentials failed the health check"})
         raise HTTPException(502, "Endpoint or credentials failed the health check")
     if generation!=app.state.gateway.generation or app.state.gateway.maintenance:
@@ -230,16 +242,20 @@ async def check_connection_health(app, record_id, actor="system"):
                 store.insert("deployments", {"id":uid("dep_"),"connection_id":record_id,"model":item["model"],"capabilities":encode(item["capabilities"]),"metadata_hash":item.get("metadata_hash","")})
                 changed.append("New model: " + item["model"])
             else:
-                fields = {"available":1,"metadata_hash":item.get("metadata_hash","")}
+                fields = {"metadata_hash":item.get("metadata_hash","")}
+                if topology.multi_dc:observe_deployment(store,topology.site,existing['id'],available=1)
+                else:fields['available']=1
                 if existing["metadata_hash"] and fields["metadata_hash"] and existing["metadata_hash"] != fields["metadata_hash"]:
                     fields.update(verified="[]", verified_at=None)
                     changed.append("Model metadata changed; verification reset: " + item["model"])
                 store.update("deployments",existing["id"],fields)
         for item in store.all("SELECT * FROM deployments WHERE connection_id=?",(record_id,)):
             if item["model"] not in seen and not row["manual_model"]:
-                store.update("deployments",item["id"],{"available":0})
+                if topology.multi_dc:observe_deployment(store,topology.site,item['id'],available=0)
+                else:store.update("deployments",item["id"],{"available":0})
                 if item["available"]:
                     changed.append("Model no longer advertised: " + item["model"])
+        if topology.multi_dc:observe_connection(store,topology.site,record_id,'connected')
         store.update("connections",record_id,{"status":"connected","last_checked":now(),"last_error":None})
         for message in changed:
             store.insert("notifications",{"id":uid("note_"),"kind":"model-drift","target":record_id,"message":message,"created":now()})
@@ -257,7 +273,9 @@ async def maintain(app):
             if app.state.gateway.maintenance:
                 continue
             if store.setting("runtime",{}).get("health_checks",True):
-                due = store.all("SELECT id FROM connections WHERE enabled=1 AND health_interval>0 AND (last_checked IS NULL OR last_checked+health_interval<?) LIMIT 5",(now(),))
+                if app.state.gateway.cluster.topology.multi_dc:
+                    due=store.all("SELECT c.id FROM connections c LEFT JOIN connection_health h ON h.connection_id=c.id AND h.site=? WHERE c.enabled=1 AND c.health_interval>0 AND (h.last_checked IS NULL OR h.last_checked+c.health_interval<?) LIMIT 5",(app.state.gateway.cluster.topology.site,store.clock()))
+                else:due = store.all("SELECT id FROM connections WHERE enabled=1 AND health_interval>0 AND (last_checked IS NULL OR last_checked+health_interval<?) LIMIT 5",(now(),))
                 for row in due:
                     try:
                         await check_connection_health(app,row["id"])
@@ -292,14 +310,25 @@ def mount(app):
     def edit_connection(record_id: str,body:ConnectionPatch,p=Depends(admin)):
         existing=store.one("SELECT * FROM connections WHERE id=?",(record_id,))
         if not existing:raise HTTPException(404,"Connection not found")
+        if 'site' not in body.model_fields_set:
+            body.site=existing.get('site') or None
+            if 'region' not in body.model_fields_set:body.region=existing.get('region') or None
+        if body.site:
+            target=store.one('SELECT region FROM sites WHERE id=?',(body.site,))
+            if not target:raise HTTPException(422,'Register the model site before assigning this endpoint')
+            if body.region and body.region!=target['region']:raise HTTPException(422,'Model region must match its registered site')
+            body.region=target['region']
+        elif body.region:raise HTTPException(422,'Assign a site when specifying a region')
         endpoint=endpoint_url(body.endpoint)
         headers("validation",body.auth_header,body.auth_prefix)
         fields=body.model_dump(exclude={"api_key"})
-        fields.update(endpoint=endpoint,status="configured" if body.enabled else "disconnected",last_checked=None,last_error=None)
+        fields.update(site=body.site or '',region=body.region or '',endpoint=endpoint,status="configured" if body.enabled else "disconnected",last_checked=None,last_error=None)
         if body.api_key is not None:fields["secret"]=vault.encrypt(body.api_key)
         with store.transaction():
             store.update("connections",record_id,fields)
             store.run('DELETE FROM cache_entries')
+            store.run('DELETE FROM connection_health WHERE connection_id=?',(record_id,))
+            store.run('DELETE FROM deployment_health WHERE deployment_id IN (SELECT id FROM deployments WHERE connection_id=?)',(record_id,))
             if endpoint!=existing["endpoint"] or body.provider!=existing["provider"]:
                 store.run("UPDATE deployments SET verified='[]',verified_at=NULL,metadata_hash='' WHERE connection_id=?",(record_id,))
             store.audit(p["id"],"connection.updated",record_id,{"fields":list(fields),"credentials_rotated":body.api_key is not None})
@@ -470,7 +499,7 @@ def mount(app):
         try:
             result=restore_bytes(store,vault,archive,body.password)
             with store.transaction():
-                store.run('INSERT INTO runtime_nodes (id,heartbeat) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET heartbeat=excluded.heartbeat',(app.state.gateway.cluster.node,now()))
+                store.run('INSERT INTO runtime_nodes (id,heartbeat,site,region) VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET heartbeat=excluded.heartbeat,site=excluded.site,region=excluded.region',(app.state.gateway.cluster.node,store.clock(),app.state.gateway.cluster.topology.site,app.state.gateway.cluster.topology.region))
             store.set_setting('auth_epoch',secrets.token_hex(16))
             ctx['oauth']._clients.clear()
             ctx['oauth']._registry.clear()

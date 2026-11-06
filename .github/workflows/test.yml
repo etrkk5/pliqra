@@ -59,7 +59,7 @@ jobs:
         with:
           python-version: '3.13'
       - run: python -m pip install -r requirements-dev.txt
-      - run: python -m pytest tests/test_scale.py -q
+      - run: python -m pytest tests/test_scale.py tests/test_multidc.py -q
   clients:
     runs-on: ubuntu-latest
     steps:

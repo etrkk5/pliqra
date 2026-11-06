@@ -28,7 +28,7 @@ Pliqra combines a model-as-a-service catalog, inference routing, custom gateway 
 | **An explanation for every call** | Follow routing, fallback attempts, guardrail decisions, timing, tokens and estimated costs. Administrators see cumulative totals and team-level detail. |
 | **Publish with evidence** | Version prompts, queue durable batches, compare models with external judges, and gate canary releases on fresh quality evidence. |
 | **One policy across interfaces** | Chat, embeddings, speech/transcription, Responses, Messages and Ollama through the same admission and accounting boundary. |
-| **Start small, share state when needed** | One Docker image by default. Optional PostgreSQL, multiple replicas, shared quotas, isolated organizations and a separate analytics database. |
+| **Start small, share state when needed** | One Docker image by default. Optional PostgreSQL and active/active data centers with exact shared quotas, local model preference, site draining, isolated organizations and analytics. |
 | **Identity without platform lock-in** | OIDC/SAML/SCIM, signed logout, short-lived workload identities and environment/file/Vault secret references. |
 
 ## Quick start
@@ -58,10 +58,11 @@ Open **http://localhost:8088**, create your administrator, then follow **connect
 | [Capability reference](docs/CAPABILITIES.md) | Full feature matrix and management API entry points |
 | [Prompts, batches & releases](docs/WORKFLOWS.md) | Immutable prompts, durable execution, external judges and canary gates |
 | [Model interfaces](docs/MODEL_INTERFACES.md) | Embeddings, audio and native API compatibility boundaries |
+| [Active/active data centers](docs/MULTI_DC.md) | Shared quota authority, local routing, DC drain and safe recovery |
 | [Scale & organizations](docs/PLATFORM.md) | PostgreSQL, distributed admission, isolated workspaces and analytics |
 | [Identity compatibility](docs/IDENTITY_COMPATIBILITY.md) | Real Keycloak evidence, vendor profiles, workload trust and secret sources |
 | [Clients & conformance](docs/CONFORMANCE.md) | Python, JavaScript/TypeScript, Go and an executable protocol profile |
 | [Technical architecture review](docs/TECHNICAL_REVIEW.md) | Findings, corrected designs, regression evidence and deployment boundaries |
 | [Validation & scope](docs/RELEASE.md) | Automated/runtime evidence, exercised flows and operating limits |
 
-**Current release: 2.0.0.** The default remains a single container. Protocol draft 0.1; native APIs are documented subsets. [Roadmap delivery](docs/ROADMAP.md) separates implemented scope from external vendor acceptance and ecosystem adoption.
+**Current release: 2.1.0.** The default remains a single container. Protocol draft 0.1; native APIs are documented subsets. [Roadmap delivery](docs/ROADMAP.md) separates implemented scope from external vendor acceptance and ecosystem adoption.

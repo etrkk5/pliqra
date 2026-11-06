@@ -18,19 +18,20 @@ from tests.test_fabric import gateway, bound_key, invoke
 
 
 @pytest.fixture
-def replicas(tmp_path):
+def replicas(tmp_path,request):
     url=os.getenv('PLIQRA_TEST_POSTGRES_URL')
     if not url:pytest.skip('Real PostgreSQL integration URL is not configured')
     import psycopg
     schema='test_'+uuid.uuid4().hex
     encryption=Fernet.generate_key()
-    first=create_app(tmp_path/'one',database_url=url,database_schema=schema,encryption_key=encryption)
+    topology=getattr(request,'param',[None,None])
+    first=create_app(tmp_path/'one',database_url=url,database_schema=schema,encryption_key=encryption,runtime_topology=topology[0])
     first.state.test_org_schemas=[]
     with TestClient(first) as a:
         setup=a.post('/api/v1/setup',json={'name':'Scale owner','email':'owner@example.test','password':'long-local-password'})
         assert setup.status_code==200,setup.text
         a.headers['X-Pliqra-CSRF']=setup.json()['csrf']
-        second=create_app(tmp_path/'two',database_url=url,database_schema=schema,encryption_key=encryption)
+        second=create_app(tmp_path/'two',database_url=url,database_schema=schema,encryption_key=encryption,runtime_topology=topology[1])
         with TestClient(second) as b:
             login=b.post('/api/v1/login',json={'email':'owner@example.test','password':'long-local-password'})
             assert login.status_code==200,login.text

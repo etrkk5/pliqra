@@ -44,6 +44,8 @@ class WorkspaceSessionMiddleware(SessionMiddleware):
         super().__init__(app,secret_key=key_provider(),**kwargs)
 
     async def __call__(self,scope,receive,send):
+        if scope.get('type')=='http' and get_route_path(scope) in ('/livez','/readyz','/healthz'):
+            return await self.app(scope,receive,send)
         self.signer=TimestampSigner(self.key_provider())
         return await super().__call__(scope,receive,send)
 
@@ -64,7 +66,12 @@ class Setup(Login):
         return value
 
 
+from .topology import RuntimeTopology,Placement,SiteID
+
+
 class ConnectionInput(BaseModel):
+    site:SiteID|Literal['']|None=None
+    region:SiteID|Literal['']|None=None
     name: Name
     endpoint: Annotated[str, Field(min_length=8, max_length=2000)]
     api_key: Annotated[str, Field(max_length=4096)] = ""
@@ -99,6 +106,7 @@ class PortInput(BaseModel):
     cache_ttl: Annotated[int, Field(ge=0, le=3600)] = 0
     max_input_chars: Annotated[int, Field(ge=1, le=1000000)] = 200000
     max_output_tokens: Annotated[int, Field(ge=1, le=131072)] = 32768
+    placement:Placement=Placement()
     strategy: Literal["priority", "round_robin"] = "priority"
     enabled: bool = True
 
@@ -164,10 +172,20 @@ def safe_user(row):
     return {key: row[key] for key in ("id", "email", "name", "role", "issuer", "active", "created")}
 
 
-def create_app(data_dir=None, *, database_url=None, database_schema=None, encryption_key=None, organization=None, public_url_override=None):
+def create_app(data_dir=None, *, database_url=None, database_schema=None, encryption_key=None, organization=None, public_url_override=None, runtime_topology=None):
     directory = Path(data_dir or env("PLIQRA_DATA_DIR", "data"))
+    runtime_topology=runtime_topology or RuntimeTopology.from_env()
+    selected_url=database_url if database_url is not None else env('PLIQRA_DATABASE_URL','')
+    if runtime_topology.multi_dc:
+        if not selected_url:raise RuntimeError('Multi-DC mode requires one shared writable PostgreSQL authority')
+        options=psycopg.conninfo.conninfo_to_dict(selected_url)
+        addresses=options.get('host') or options.get('hostaddr')
+        if not addresses:raise RuntimeError('Multi-DC database addresses must be explicit')
+        hosts=addresses.split(',')
+        if any(h not in ('localhost','127.0.0.1','::1') for h in hosts) and options.get('sslmode')!='verify-full':raise RuntimeError('Remote multi-DC control databases require sslmode=verify-full')
     store, login_attempts = Store(directory,database_url,database_schema), {}
     try:
+        store.runtime_topology=runtime_topology
         vault = Vault(directory,store,encryption_key)
     except BaseException:
         store.close()
@@ -187,6 +205,8 @@ def create_app(data_dir=None, *, database_url=None, database_schema=None, encryp
             from .operations import maintain
             worker = asyncio.create_task(maintain(app))
             heartbeat = asyncio.create_task(app.state.gateway.cluster.heartbeat())
+            from .cluster import restart_when_fenced
+            restart_task=asyncio.create_task(restart_when_fenced(app.state.gateway.cluster)) if env('PLIQRA_RESTART_ON_FENCE','0')=='1' else None
             app.state.jobs = set()
             from .batches import worker as batch_worker
             batch_worker_task=asyncio.create_task(batch_worker(app))
@@ -198,11 +218,12 @@ def create_app(data_dir=None, *, database_url=None, database_schema=None, encryp
                 if hasattr(app.state,'organizations'):await app.state.organizations.close()
                 worker.cancel()
                 heartbeat.cancel()
+                if restart_task:restart_task.cancel()
                 batch_worker_task.cancel()
                 analytics_task.cancel()
                 for job in list(app.state.jobs):
                     job.cancel()
-                await asyncio.gather(worker, heartbeat, batch_worker_task, analytics_task, *list(app.state.jobs), return_exceptions=True)
+                await asyncio.gather(worker, heartbeat, batch_worker_task, analytics_task, *([restart_task] if restart_task else []), *list(app.state.jobs), return_exceptions=True)
                 app.state.gateway.cluster.close()
         store.close()
 
@@ -243,21 +264,23 @@ def create_app(data_dir=None, *, database_url=None, database_schema=None, encryp
                     return JSONResponse({"detail": "Request exceeds 4 MB"}, 413)
                 chunks.append(chunk)
             request._body = b"".join(chunks)
+        if path=='/livez':return JSONResponse({'status':'alive'},headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'})
         control=(request.method in ('POST','PATCH','PUT','DELETE') and path.startswith(('/api/','/scim/'))) or path.startswith('/auth/') or path=='/protocol/v1/bindings'
         try:
             if control and path not in ('/api/v1/backups/restore','/api/chat','/api/generate'):
                 with app.state.gateway.cluster.checking('management'):
                     response=await call_next(request)
             else:response = await call_next(request)
-        except HTTPException as exc:return JSONResponse({'detail':exc.detail},exc.status_code,headers=exc.headers)
+        except HTTPException as exc:return JSONResponse({'detail':exc.detail},exc.status_code,headers={'Cache-Control':'no-store',**(exc.headers or {})})
         except psycopg.OperationalError:
             app.state.gateway.cluster.fence()
-            return JSONResponse({'detail':'Storage connection failed; restart this replica after database recovery. Inspect requests before retrying inference.'},503,headers={'Retry-After':'5'})
+            return JSONResponse({'detail':'Storage connection failed; restart this replica after database recovery. Inspect requests before retrying inference.'},503,headers={'Retry-After':'5','Cache-Control':'no-store'})
+        response.headers['X-Pliqra-Site']=app.state.gateway.cluster.topology.site
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "same-origin"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
-        if path.startswith(("/api/", "/auth/", "/protocol/", "/v1/", "/g/")):
+        if path in ("/healthz","/readyz") or path.startswith(("/api/", "/auth/", "/protocol/", "/v1/", "/g/")):
             response.headers["Cache-Control"] = "no-store"
         return response
 
@@ -309,12 +332,17 @@ def create_app(data_dir=None, *, database_url=None, database_schema=None, encryp
             raise HTTPException(403, "Administrator access is required")
         return p
 
+    def session_metadata():
+        topology=store.runtime_topology
+        label='Multi-DC · '+topology.site if topology.multi_dc else 'PostgreSQL · shared state' if store.backend=='postgresql' else 'Single container · SQLite'
+        return {'workspace_name':(organization or {}).get('name','Your workspace'),'deployment_label':label,'version':__version__}
+
     def session_response(account, request=None, federation_context=None):
         token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
         with store.transaction():
             store.run("DELETE FROM sessions WHERE expires<?", (now(),))
             store.insert("sessions", {"token_hash": digest(token), "user_id": account["id"], "csrf": csrf, "expires": now() + 43200,'federation_context':encode(federation_context or {})})
-        response = RedirectResponse(base_path+'/', 303) if request else JSONResponse({"user": safe_user(account), "csrf": csrf})
+        response = RedirectResponse(base_path+'/', 303) if request else JSONResponse({"user": safe_user(account), "csrf": csrf,**session_metadata()})
         response.set_cookie(cookie_name, token, httponly=True, secure=secure_cookies, samesite="lax", max_age=43200, path=base_path or '/')
         return response
 
@@ -327,10 +355,12 @@ def create_app(data_dir=None, *, database_url=None, database_schema=None, encryp
             login_attempts.clear()
         login_attempts[address] = attempts + [now()]
 
+    @app.get("/readyz", tags=["System"])
     @app.get("/healthz", tags=["System"])
     def health():
         store.one("SELECT 1")
-        if hasattr(app.state,'gateway'):app.state.gateway.cluster.ensure_live()
+        if hasattr(store,'ensure_writable'):store.ensure_writable()
+        if hasattr(app.state,'gateway'):app.state.gateway.cluster.ensure_serving()
         return {"status": "ok", "version": __version__}
 
     @app.get("/api/v1/session", tags=["Authentication"])
@@ -343,7 +373,7 @@ def create_app(data_dir=None, *, database_url=None, database_schema=None, encryp
                 raise HTTPException(401)
             federation=store.one('SELECT protocol,config FROM identity_providers WHERE id=?',(p['user']['issuer'],))
             logout=f"/api/v1/identity-providers/{p['user']['issuer']}/logout" if federation and federation['protocol']=='saml' and json.loads(federation['config']).get('slo_url') else None
-            return {"setup_required": setup, "user": safe_user(p["user"]), "csrf": p["csrf"], "identity_providers": providers, "version": __version__,'federated_logout':logout,'workspace_name':(organization or {}).get('name','Your workspace'),'deployment_label':'PostgreSQL · shared state' if store.backend=='postgresql' else 'Single container · SQLite'}
+            return {"setup_required": setup, "user": safe_user(p["user"]), "csrf": p["csrf"], "identity_providers": providers, "version": __version__,'federated_logout':logout,**session_metadata()}
         except HTTPException:
             return {"setup_required": setup, "user": None, "identity_providers": providers, "version": __version__}
 
@@ -376,7 +406,7 @@ def create_app(data_dir=None, *, database_url=None, database_schema=None, encryp
 
     @app.get("/api/v1/connections", tags=["Connections"])
     def connections(p=Depends(user)):
-        rows = store.all("SELECT id,name,endpoint,provider,status,last_checked,last_error,created,enabled,health_interval,manual_model,auth_header,auth_prefix,(secret IS NOT NULL AND secret!='') AS has_secret FROM connections ORDER BY created DESC")
+        rows = store.all("SELECT id,name,endpoint,provider,status,last_checked,last_error,created,enabled,health_interval,manual_model,auth_header,auth_prefix,site,region,(secret IS NOT NULL AND secret!='') AS has_secret FROM connections ORDER BY created DESC")
         visible = set()
         if p['role'] != 'admin':
             for candidate in store.all("SELECT * FROM ports"):
@@ -386,6 +416,9 @@ def create_app(data_dir=None, *, database_url=None, database_schema=None, encryp
         result = []
         for row in rows:
             deployments = [decoded_deployment(item) for item in store.all("SELECT * FROM deployments WHERE connection_id=?", (row["id"],)) if p['role']=='admin' or item['id'] in visible]
+            if app.state.gateway.cluster.topology.multi_dc:
+                observation=store.one('SELECT status,last_checked,last_error FROM connection_health WHERE site=? AND connection_id=?',(app.state.gateway.cluster.topology.site,row['id']))
+                row={**row,**(observation or {'status':'configured','last_checked':None,'last_error':'Not checked from this site yet'})}
             if p['role']=='admin' or deployments:
                 result.append({**row, 'endpoint':row['endpoint'] if p['role']=='admin' else '', 'has_secret':bool(row['has_secret']), 'models':deployments})
         return result
@@ -404,10 +437,16 @@ def create_app(data_dir=None, *, database_url=None, database_schema=None, encryp
 
     @app.post("/api/v1/connections", tags=["Connections"], status_code=201)
     async def create_connection(body: ConnectionInput, p=Depends(admin)):
+        if body.site:
+            target=store.one('SELECT region FROM sites WHERE id=?',(body.site,))
+            if not target:raise HTTPException(422,'Register the model site before assigning this endpoint')
+            if body.region and body.region!=target['region']:raise HTTPException(422,'Model region must match its registered site')
+            body.region=target['region']
+        elif body.region:raise HTTPException(422,'Assign a site when specifying a region')
         found = await probe(body, p)
         connection_id = uid("con_")
         with store.transaction():
-            store.insert("connections", {"id": connection_id, "name": body.name.strip(), "endpoint": found["endpoint"], "provider": found["provider"], "secret": vault.encrypt(body.api_key), "status": "configured" if body.model else "connected", "last_checked": now() if not body.model else None, "manual_model": body.model, "auth_header": body.auth_header, "auth_prefix": body.auth_prefix, "created": now()})
+            store.insert("connections", {"id": connection_id, "name": body.name.strip(), "endpoint": found["endpoint"], "provider": found["provider"], "secret": vault.encrypt(body.api_key), "status": "configured" if body.model else "connected", "last_checked": now() if not body.model else None, "manual_model": body.model, "auth_header": body.auth_header, "auth_prefix": body.auth_prefix, "created": now(),"site":body.site or "","region":body.region or ""})
             services = []
             for item in found["models"]:
                 deployment_id = uid("dep_")
@@ -465,7 +504,7 @@ def create_app(data_dir=None, *, database_url=None, database_schema=None, encryp
                 raise HTTPException(422, "One of the selected deployments does not exist")
         if body.project_id and not store.one("SELECT id FROM projects WHERE id=?", (body.project_id,)):
             raise HTTPException(422, "Project not found")
-        return {"log_content":int(body.log_content),"project_id":body.project_id,"verified_only":int(body.verified_only),"cache_ttl":body.cache_ttl,"max_input_chars":body.max_input_chars,"max_output_tokens":body.max_output_tokens,"name": body.name, "description": body.description, "deployments": encode(list(dict.fromkeys(body.deployments))), "requirements": encode(body.requirements), "strategy": body.strategy, "enabled": int(body.enabled)}
+        return {"placement":encode(body.placement.model_dump()),"log_content":int(body.log_content),"project_id":body.project_id,"verified_only":int(body.verified_only),"cache_ttl":body.cache_ttl,"max_input_chars":body.max_input_chars,"max_output_tokens":body.max_output_tokens,"name": body.name, "description": body.description, "deployments": encode(list(dict.fromkeys(body.deployments))), "requirements": encode(body.requirements), "strategy": body.strategy, "enabled": int(body.enabled)}
 
     @app.post("/api/v1/ports", tags=["AI services"], status_code=201)
     def create_port(body: PortInput, p=Depends(admin)):
@@ -710,7 +749,7 @@ def create_app(data_dir=None, *, database_url=None, database_schema=None, encryp
         binding['extensions']=encode(extensions)
         store.insert("bindings", binding)
         store.audit(p["id"], "binding.created", binding["id"], {"service": port["name"], "version": port["version"]})
-        return {**binding, "requirements": body.requirements, 'extensions':extensions,"invoke": f"/protocol/v1/bindings/{binding['id']}/invoke", "service": port["name"],'operation_invocations':{name:f"/protocol/v1/bindings/{binding['id']}/operations/{name}" for name in ('embeddings','speech','transcription')} if 'pliqra.operations/1' in extensions else {}}
+        return {**binding, "requirements": body.requirements, 'extensions':extensions,"invoke": f"/protocol/v1/bindings/{binding['id']}/invoke", "service": port["name"],'placement':port.get('placement') or {},'operation_invocations':{name:f"/protocol/v1/bindings/{binding['id']}/operations/{name}" for name in ('embeddings','speech','transcription')} if 'pliqra.operations/1' in extensions else {}}
 
     @app.post("/protocol/v1/bindings/{record_id}/invoke", tags=["Protocol"])
     async def invoke(record_id: str, body: ChatInput, p=Depends(principal)):
@@ -764,6 +803,8 @@ def create_app(data_dir=None, *, database_url=None, database_schema=None, encryp
     mount_native(app)
     from .platform import mount as mount_platform
     mount_platform(app)
+    from .topology import mount as mount_topology
+    mount_topology(app)
     from .identity_profiles import mount as mount_identity_profiles
     mount_identity_profiles(app)
     if organization is None:

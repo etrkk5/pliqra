@@ -1,0 +1,25 @@
+# Run this file separately in each data center against ONE externally managed
+# PostgreSQL primary/HA service. Never create an independent writer per DC.
+name: pliqra-${PLIQRA_SITE:?Set a unique site name}
+services:
+  gateway:
+    image: pliqra:2.1.0
+    build: .
+    environment:
+      PLIQRA_MULTI_DC: "1"
+      PLIQRA_SITE: ${PLIQRA_SITE:?Set a unique site name}
+      PLIQRA_REGION: ${PLIQRA_REGION:?Set the site's region}
+      PLIQRA_DATABASE_URL: ${PLIQRA_DATABASE_URL:?Set the same verified-TLS writable authority in every DC}
+      PLIQRA_DATABASE_SCHEMA: ${PLIQRA_DATABASE_SCHEMA:-pliqra}
+      PLIQRA_ENCRYPTION_KEY_FILE: /run/pliqra/master.key
+      PLIQRA_PUBLIC_URL: ${PLIQRA_PUBLIC_URL:?Set the shared HTTPS public URL}
+      PLIQRA_SECURE_COOKIES: "1"
+      PLIQRA_RESTART_ON_FENCE: "1"
+    ports:
+      - "127.0.0.1:${PLIQRA_HTTP_PORT:-8088}:8080"
+    volumes:
+      - gateway-state:/data
+      - ${PLIQRA_CONFIG_DIR:?Mount the shared master key and database CA}:/run/pliqra:ro
+    restart: unless-stopped
+volumes:
+  gateway-state:

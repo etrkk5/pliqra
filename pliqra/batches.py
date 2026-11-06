@@ -34,6 +34,10 @@ async def execute(app,batch):
             current=store.one('SELECT * FROM batches WHERE id=?',(batch['id'],))
             if not current or current['cancel_requested']:raise asyncio.CancelledError()
             gateway.cluster.ensure_live()
+            site=store.one('SELECT mode FROM sites WHERE id=?',(gateway.cluster.topology.site,))
+            if not site or site['mode']!='active':
+                store.update('batches',batch['id'],{'status':'queued','node_id':None})
+                return
             if current['expires']<=now():
                 store.run("UPDATE batch_items SET status='expired',error='Batch deadline elapsed before invocation' WHERE batch_id=? AND status='queued'",(batch['id'],))
                 break
@@ -108,7 +112,7 @@ async def worker(app):
             for record_id,task in list(tasks.items()):
                 if task.done():tasks.pop(record_id,None)
                 elif store.one('SELECT cancel_requested FROM batches WHERE id=?',(record_id,))['cancel_requested']:task.cancel()
-            if not app.state.gateway.maintenance and not app.state.gateway.cluster.fenced:
+            if not app.state.gateway.maintenance and not app.state.gateway.cluster.fenced and store.one('SELECT mode FROM sites WHERE id=?',(app.state.gateway.cluster.topology.site,))['mode']=='active':
                 with store.transaction():
                     running=store.one("SELECT COUNT(*) AS n FROM batches WHERE status='running'")['n']
                     if running<store.setting('runtime',{}).get('max_batch_concurrency',2):

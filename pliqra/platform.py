@@ -10,7 +10,7 @@ from .db import SCHEMA_VERSION,encode,now,uid
 from .cluster import NODE_TIMEOUT
 from .secrets import SecretResolver
 
-COLUMNS=['id','started','finished','actor_user_id','project_id','team_id','key_id','port_name','model','status','input_tokens','output_tokens','cost_micros','usage_source','latency_ms','delivery','request_kind','updated']
+COLUMNS=['id','started','finished','actor_user_id','project_id','team_id','key_id','port_name','model','status','input_tokens','output_tokens','cost_micros','usage_source','latency_ms','delivery','request_kind','updated','ingress_site','model_site']
 
 
 class AnalyticsInput(BaseModel):
@@ -76,11 +76,11 @@ def mount(app):
     @app.get('/api/v1/platform/status',tags=['Platform'])
     def status(p=Depends(admin)):
         return {'storage':store.backend,'storage_label':'Shared PostgreSQL' if store.backend=='postgresql' else 'Local SQLite',
-            'live_replicas':store.one('SELECT COUNT(*) AS n FROM runtime_nodes WHERE heartbeat>?',(now()-NODE_TIMEOUT,))['n'],
+            'live_replicas':store.one('SELECT COUNT(*) AS n FROM runtime_nodes WHERE heartbeat>?',(store.clock()-NODE_TIMEOUT,))['n'],
             'active_requests':store.one("SELECT COUNT(*) AS n FROM runtime_leases WHERE kind!='management'")['n'],
-            'schema':SCHEMA_VERSION,'organization':app.state.context.get('organization'),'protocol':'pliqra/0.1-draft',
+            'current_node':app.state.gateway.cluster.node,'topology':app.state.gateway.cluster.topology.model_dump(),'quota_consistency':'single-writable-authority','schema':SCHEMA_VERSION,'organization':app.state.context.get('organization'),'protocol':'pliqra/0.1-draft',
             'interfaces':['chat','embeddings','speech','transcription','responses','anthropic','ollama'],
-            'replicas':store.all('SELECT id,heartbeat FROM runtime_nodes ORDER BY heartbeat DESC')}
+            'replicas':store.all('SELECT id,heartbeat,site,region FROM runtime_nodes ORDER BY heartbeat DESC')}
 
     @app.get('/api/v1/analytics',tags=['Platform'])
     def analytics(p=Depends(admin)):
