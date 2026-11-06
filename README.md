@@ -7,6 +7,7 @@
 <p align="center">
   <a href="https://github.com/etrkk5/pliqra/actions/workflows/test.yml"><img src="https://github.com/etrkk5/pliqra/actions/workflows/test.yml/badge.svg" alt="Tests"></a>
   · <a href="#quick-start">Quick start</a>
+  · <a href="#multi-dc">Multi-DC</a>
   · <a href="docs/CONSOLE.md">Console tour</a>
   · <a href="docs/ARCHITECTURE.md">Architecture</a>
   · <a href="docs/PROTOCOL.md">Protocol</a>
@@ -28,7 +29,7 @@ Pliqra combines a model-as-a-service catalog, inference routing, custom gateway 
 | **An explanation for every call** | Follow routing, fallback attempts, guardrail decisions, timing, tokens and estimated costs. Administrators see cumulative totals and team-level detail. |
 | **Publish with evidence** | Version prompts, queue durable batches, compare models with external judges, and gate canary releases on fresh quality evidence. |
 | **One policy across interfaces** | Chat, embeddings, speech/transcription, Responses, Messages and Ollama through the same admission and accounting boundary. |
-| **Start small, share state when needed** | One Docker image by default. Optional PostgreSQL and active/active data centers with exact shared quotas, local model preference, site draining, isolated organizations and analytics. |
+| **Start small, scale across sites** | One Docker image by default. Add PostgreSQL, isolated organizations, analytics and active/active data centers when needed. |
 | **Identity without platform lock-in** | OIDC/SAML/SCIM, signed logout, short-lived workload identities and environment/file/Vault secret references. |
 
 ## Quick start
@@ -44,6 +45,14 @@ docker compose up --build -d
 Open **http://localhost:8088**, create your administrator, then follow **connect endpoint → make a real call → connect application**. Your workspace starts empty; the model endpoint must be reachable from inside the container.
 
 [Installation & first call →](docs/GETTING_STARTED.md) · [Two-replica installation →](docs/PLATFORM.md#start-two-gateways)
+
+## Multi-DC
+
+Run active gateways across data centers with **one shared writable PostgreSQL authority**. Prefer local models, enforce global request/token quotas and concurrency limits, and control site draining or standby through the console or API.
+
+Admitted calls can finish during draining. Disconnected sites stop admitting new calls; started calls are not replayed after recovery. Your infrastructure provides PostgreSQL HA and global ingress.
+
+[Setup, architecture & failure behavior →](docs/MULTI_DC.md) · [Multi-DC deployment file →](compose.multidc.yaml)
 
 ## Go deeper
 
