@@ -37,3 +37,35 @@ jobs:
             sleep 1
           done
           exit 1
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-bookworm
+        env:
+          POSTGRES_DB: pliqra
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci-synthetic-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d pliqra"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      PLIQRA_TEST_POSTGRES_URL: postgresql://postgres:ci-synthetic-password@localhost:5432/pliqra
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m pytest tests/test_scale.py -q
+  clients:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: JavaScript client boundaries and streaming
+        run: node sdk/javascript/test.mjs
+      - name: Go client boundaries and streaming
+        working-directory: sdk/go
+        run: go test ./...

@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from .access import project_ids, require_project, service_allowed
 from .connectors import discover, headers
-from .db import encode, now, uid
+from .db import encode, now, uid, SCHEMA_VERSION
 from .gateway import decoded_port
 from .security import digest, endpoint_url, hash_password, verify_password, validate_encryption
 
@@ -27,7 +27,7 @@ from .security import digest, endpoint_url, hash_password, verify_password, vali
 class ConnectionPatch(BaseModel):
     name: Annotated[str, Field(min_length=1, max_length=100)]
     endpoint: Annotated[str, Field(max_length=2000)]
-    provider: Literal["openai", "ollama"]
+    provider: Literal["openai", "ollama", "responses", "anthropic"]
     api_key: Annotated[str | None, Field(max_length=4096)] = None
     enabled: bool = True
     health_interval: Annotated[int, Field(ge=0, le=86400)] = 300
@@ -71,6 +71,7 @@ class RestoreInput(BackupInput):
 class RuntimeInput(BaseModel):
     retention_days: Annotated[int, Field(ge=32, le=3650)] = 90
     max_concurrency: Annotated[int, Field(ge=1, le=200)] = 64
+    max_batch_concurrency: Annotated[int, Field(ge=1, le=32)] = 2
     health_checks: bool = True
 
 
@@ -82,10 +83,13 @@ class ImportInput(BaseModel):
 
 
 def snapshot_port(store, port, actor):
-    store.run("INSERT OR IGNORE INTO port_versions VALUES (?,?,?,?,?)", (port["id"], port["version"], encode(port), actor, now()))
+    store.run("INSERT INTO port_versions VALUES (?,?,?,?,?) ON CONFLICT DO NOTHING", (port["id"], port["version"], encode(port), actor, now()))
 
 
 def backup_bytes(store, vault, password):
+    if store.backend=='postgresql':
+        from .logical_archive import backup
+        return backup(store,vault,password)
     salt = secrets.token_bytes(16)
     key = base64.urlsafe_b64encode(hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 600000))
     with tempfile.TemporaryDirectory() as directory:
@@ -94,33 +98,38 @@ def backup_bytes(store, vault, password):
         with store.lock:
             store.conn.backup(destination)
         destination.close()
-        payload = encode({"format": "pliqra-backup/1", "schema": 3, "created": now(), "database": base64.b64encode(path.read_bytes()).decode(), "key": vault.key.decode()}).encode()
+        if path.stat().st_size>32_000_000:raise HTTPException(413,'Workspace exceeds the 32 MB online backup limit; use a native database/volume snapshot')
+        payload = encode({"format": "pliqra-backup/1", "schema": SCHEMA_VERSION, "created": now(), "database": base64.b64encode(path.read_bytes()).decode(), "key": vault.key.decode()}).encode()
     return b"PLQBACK01" + salt + Fernet(key).encrypt(payload)
 
 
 def restore_bytes(store, vault, archive, password):
+    if archive[:9]==b'PLQLOGI01':
+        from .logical_archive import restore
+        return restore(store,vault,archive,password)
+    if store.backend=='postgresql':raise HTTPException(422,'Use a PostgreSQL logical backup for this workspace')
     if archive[:9] not in (b"PLQBACK01",b"MPBACKUP1") or len(archive) < 100:
         raise HTTPException(422, "This is not a Pliqra encrypted backup")
     salt = archive[9:25]
     key = base64.urlsafe_b64encode(hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 600000))
     try:
         payload = json.loads(Fernet(key).decrypt(archive[25:]))
-        if payload["format"] not in ("pliqra-backup/1","modelport-backup/1") or payload["schema"] not in (2,3):
+        if payload["format"] not in ("pliqra-backup/1","modelport-backup/1") or payload["schema"] not in (2,3,SCHEMA_VERSION):
             raise ValueError()
         replacement = payload["key"].encode()
         Fernet(replacement)
         raw = base64.b64decode(payload["database"], validate=True)
     except (InvalidToken, ValueError, KeyError, TypeError):
         raise HTTPException(422, "Backup password is incorrect or the archive is damaged")
-    environment_key = env("PLIQRA_ENCRYPTION_KEY")
-    if environment_key and environment_key.encode() != replacement:
+    environment_key = vault.external
+    if environment_key and vault.key != replacement:
         raise HTTPException(409, "The backup uses a different encryption key. Restore using the matching PLIQRA_ENCRYPTION_KEY.")
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "restore.sqlite3"
         path.write_bytes(raw)
         try:
             source = sqlite3.connect(path)
-            if source.execute("PRAGMA integrity_check").fetchone()[0] != "ok" or source.execute("PRAGMA user_version").fetchone()[0] not in (2,3):
+            if source.execute("PRAGMA integrity_check").fetchone()[0] != "ok" or source.execute("PRAGMA user_version").fetchone()[0] not in (2,3,SCHEMA_VERSION):
                 raise ValueError()
             if not source.execute("SELECT id FROM users WHERE role='admin' AND issuer='local' AND active=1").fetchone():
                 raise ValueError()
@@ -154,8 +163,13 @@ def restore_bytes(store, vault, archive, password):
                 store.run("DELETE FROM sessions")
                 store.run("DELETE FROM saml_flows")
                 store.run("DELETE FROM cache_entries")
-                store.run("UPDATE events SET status='interrupted',finished=?,error='Restored from backup during an unfinished request' WHERE status='pending'", (now(),))
+                store.run("UPDATE events SET updated=?,status='interrupted',finished=?,error='Restored from backup during an unfinished request' WHERE status='pending'", (store.clock(),now(),))
                 store.run("UPDATE evaluations SET status='interrupted',finished=?,error='Restored from backup' WHERE status IN ('queued','running')", (now(),))
+                store.run("UPDATE attempts SET outcome='interrupted',finished=? WHERE outcome='pending'",(now(),))
+                store.run("UPDATE batch_items SET status='interrupted',error='Restored during execution; no automatic replay' WHERE status='running'")
+                store.run("UPDATE batches SET status='queued',node_id=NULL WHERE status='running'")
+                store.run('DELETE FROM runtime_leases')
+                store.run('DELETE FROM runtime_nodes')
                 (store.directory/'pending-restore').unlink(missing_ok=True)
             except BaseException:
                 restore = sqlite3.connect(store.directory / "pre-restore.sqlite3")
@@ -184,12 +198,14 @@ async def check_connection_health(app, record_id, actor="system"):
         fields=('endpoint','provider','secret','manual_model','auth_header','auth_prefix','enabled')
         if generation!=app.state.gateway.generation or app.state.gateway.maintenance or not current or any(current[k]!=row[k] for k in fields):
             raise HTTPException(409,'Workspace or connection changed during the health check; retry')
+    app.state.gateway.secrets.client=app.state.client
+    secret=await app.state.gateway.secrets.resolve(vault.decrypt(row["secret"]))
     try:
-        found = await discover(app.state.client, row["endpoint"], vault.decrypt(row["secret"]), row["provider"], row["auth_header"], row["auth_prefix"])
+        found = await discover(app.state.client, row["endpoint"], secret, row["provider"], row["auth_header"], row["auth_prefix"])
     except HTTPException:
         if row["manual_model"]:
             try:
-                async with app.state.client.stream('GET',row["endpoint"], headers=headers(vault.decrypt(row["secret"]), row["auth_header"], row["auth_prefix"]), timeout=5) as response:
+                async with app.state.client.stream('GET',row["endpoint"], headers=headers(secret, row["auth_header"], row["auth_prefix"]), timeout=5) as response:
                     if response.status_code < 500 and response.status_code not in (401,403):
                         with store.transaction():
                             ensure_current()
@@ -261,6 +277,9 @@ async def maintain(app):
                     store.run("DELETE FROM bindings WHERE expires<?",(now(),))
                     store.run("DELETE FROM saml_flows WHERE expires<?",(now(),))
                     store.run("DELETE FROM saml_assertions WHERE expires<?",(now(),))
+                    store.run("DELETE FROM workload_assertions WHERE expires<?",(now(),))
+                    store.run("DELETE FROM auth_attempts WHERE created<?",(now()-300,))
+                    store.run("DELETE FROM api_keys WHERE workload_provider_id IS NOT NULL AND expires<?",(cutoff,))
     except asyncio.CancelledError:
         raise
 
@@ -401,7 +420,7 @@ def mount(app):
 
     @app.get("/api/v1/operations",tags=["Operations"])
     def operations(p=Depends(admin)):
-        return {"runtime":store.setting("runtime",{"retention_days":90,"max_concurrency":64,"health_checks":True}),"active_requests":app.state.gateway.active,"database_bytes":(store.directory/"pliqra.sqlite3").stat().st_size,"cache_entries":store.one("SELECT COUNT(*) AS n FROM cache_entries WHERE expires>?",(now(),))["n"],"unresolved":store.all("SELECT id,started,model,port_name,status,reserved_micros,cost_micros FROM events WHERE status!='pending' AND (reserved_micros>0 OR (cost_micros IS NULL AND status IN ('incomplete','interrupted'))) ORDER BY started DESC LIMIT 200"),"notifications":store.all("SELECT * FROM notifications WHERE resolved=0 ORDER BY created DESC LIMIT 100"),"capability_probes":store.all("SELECT p.*,d.model FROM probes p LEFT JOIN deployments d ON d.id=p.deployment_id ORDER BY p.created DESC LIMIT 100")}
+        return {"runtime":store.setting("runtime",{"retention_days":90,"max_concurrency":64,"health_checks":True}),"active_requests":app.state.gateway.active,"database_bytes":store.database_size(),"cache_entries":store.one("SELECT COUNT(*) AS n FROM cache_entries WHERE expires>?",(now(),))["n"],"unresolved":store.all("SELECT id,started,model,port_name,status,reserved_micros,cost_micros FROM events WHERE status!='pending' AND (reserved_micros>0 OR (cost_micros IS NULL AND status IN ('incomplete','interrupted'))) ORDER BY started DESC LIMIT 200"),"notifications":store.all("SELECT * FROM notifications WHERE resolved=0 ORDER BY created DESC LIMIT 100"),"capability_probes":store.all("SELECT p.*,d.model FROM probes p LEFT JOIN deployments d ON d.id=p.deployment_id ORDER BY p.created DESC LIMIT 100")}
 
     @app.patch("/api/v1/operations",tags=["Operations"])
     def runtime(body:RuntimeInput,p=Depends(admin)):
@@ -445,10 +464,13 @@ def mount(app):
         try:archive=base64.b64decode(body.archive,validate=True)
         except ValueError:raise HTTPException(422,"Invalid backup encoding")
         with app.state.gateway.state_lock:
-            if app.state.gateway.active or app.state.gateway.checks or app.state.gateway.maintenance or store.one("SELECT id FROM evaluations WHERE status IN ('queued','running') LIMIT 1"):raise HTTPException(409,"Stop active requests, provider checks and evaluations before restoring")
-            app.state.gateway.maintenance=True
+            with store.transaction():
+                if store.one('SELECT id FROM runtime_leases LIMIT 1') or app.state.gateway.maintenance or store.one("SELECT id FROM evaluations WHERE status IN ('queued','running') LIMIT 1") or store.one("SELECT id FROM batches WHERE status IN ('queued','running') LIMIT 1"):raise HTTPException(409,"Stop active requests, provider checks, evaluations and batches before restoring")
+                app.state.gateway.maintenance=True
         try:
             result=restore_bytes(store,vault,archive,body.password)
+            with store.transaction():
+                store.run('INSERT INTO runtime_nodes (id,heartbeat) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET heartbeat=excluded.heartbeat',(app.state.gateway.cluster.node,now()))
             store.set_setting('auth_epoch',secrets.token_hex(16))
             ctx['oauth']._clients.clear()
             ctx['oauth']._registry.clear()

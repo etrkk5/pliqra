@@ -12,6 +12,9 @@ from urllib.parse import urlsplit, urlunsplit
 from cryptography.fernet import Fernet
 from fastapi import HTTPException
 
+ENCRYPTED_COLUMNS=(('connections','secret'),('identity_providers','secret'),('guardrails','secret'),
+                   ('secret_providers','secret'),('quality_judges','secret'),('analytics_targets','secret'),('batch_items','request'),('batch_items','result'),('cache_entries','payload'),('event_content','payload'))
+
 
 def digest(value):
     return hashlib.sha256(value.encode()).hexdigest()
@@ -35,9 +38,9 @@ def verify_password(password, stored):
 def encrypted_values(connection):
     """Stream every registered encrypted source, including optional older-schema tables."""
     tables={r[0] for r in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    for table,column in [('connections','secret'),('identity_providers','secret'),('guardrails','secret'),
-                         ('cache_entries','payload'),('event_content','payload')]:
+    for table,column in ENCRYPTED_COLUMNS:
         if table in tables:
+            if column not in {r[1] for r in connection.execute(f'PRAGMA table_info({table})')}:continue
             for row in connection.execute(f"SELECT {column} FROM {table} WHERE {column} IS NOT NULL AND {column}!=''"):
                 yield row[0]
     if 'identity_providers' in tables:
@@ -54,8 +57,14 @@ def validate_encryption(connection, key):
 
 
 class Vault:
-    def __init__(self, directory: Path):
-        key = env("PLIQRA_ENCRYPTION_KEY")
+    def __init__(self, directory: Path, store=None, key=None):
+        key = key or env("PLIQRA_ENCRYPTION_KEY")
+        key_file=env('PLIQRA_ENCRYPTION_KEY_FILE')
+        if not key and key_file:
+            key=Path(key_file).read_bytes().strip()
+        self.external=bool(key)
+        if store is not None and store.backend=='postgresql' and not key:
+            raise RuntimeError('PostgreSQL replicas require the same explicit PLIQRA_ENCRYPTION_KEY')
         path = directory / "encryption.key"
         if not key:
             if not path.exists():
@@ -74,6 +83,22 @@ class Vault:
         raw_key = key.encode() if isinstance(key, str) else key
         self.key = raw_key
         self.cookie_secret = hmac.new(raw_key, b"pliqra-cookie-signing", hashlib.sha256).hexdigest()
+        if store is not None and store.backend=='postgresql':
+            try:
+                for table,column in ENCRYPTED_COLUMNS:
+                    after=''
+                    while True:
+                        limit=1 if table=='batch_items' else 100
+                        rows=store.all(f"SELECT id,{column} FROM {table} WHERE id>? ORDER BY id LIMIT {limit}",(after,))
+                        if not rows:break
+                        for row in rows:
+                            if row[column]:self.fernet.decrypt(row[column].encode())
+                        after=rows[-1]['id']
+                for row in store.all('SELECT config FROM identity_providers'):
+                    private=json.loads(row['config']).get('sp_private_key')
+                    if private:self.fernet.decrypt(private.encode())
+            except Exception as exc:
+                raise RuntimeError('The encryption key does not match stored credentials') from exc
         database=directory/'pliqra.sqlite3'
         if database.exists():
             connection=sqlite3.connect(database)

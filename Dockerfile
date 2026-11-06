@@ -17,6 +17,7 @@ RUN pip install --no-cache-dir -r requirements.lock \
 COPY --chown=pliqra:pliqra pliqra ./pliqra
 COPY --chown=pliqra:pliqra sdk ./sdk
 COPY --chown=pliqra:pliqra docs ./docs
+COPY --chown=pliqra:pliqra examples ./examples
 USER pliqra:pliqra
 VOLUME ["/data"]
 EXPOSE 8080

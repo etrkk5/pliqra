@@ -17,7 +17,9 @@ class ApplicationConnection(BaseModel):
     project_id: str | None = None
     gateway_id: str | None = None
     team_id: str | None = None
-    requirements: Annotated[list[str], Field(max_length=5)] = ['chat']
+    requirements: Annotated[list[str], Field(max_length=8)] = ['chat']
+    required_extensions:Annotated[list[str],Field(max_length=20)]=[]
+    optional_extensions:Annotated[list[str],Field(max_length=20)]=[]
     ttl_seconds: Annotated[int, Field(ge=60, le=86400)] = 3600
 
     @field_validator('requirements')
@@ -61,6 +63,8 @@ def mount(app):
                 (u.issuer='local' OR EXISTS(SELECT 1 FROM identity_providers i WHERE i.id=u.issuer AND i.active=1))
                 AND (? IS NULL OR u.role='admin' OR EXISTS(SELECT 1 FROM memberships m WHERE m.user_id=u.id AND m.project_id=?)
                     OR EXISTS(SELECT 1 FROM team_members tm JOIN team_projects tp ON tp.team_id=tm.team_id WHERE tm.user_id=u.id AND tp.project_id=?))))"""
+        active=active.replace('? IS NULL','CAST(? AS TEXT) IS NULL')
+        if store.backend=='postgresql':active=active.replace('json_each(k.allowed_ports) a','json_array_elements_text(k.allowed_ports::json) a(value)')
         active_args = [port['id'], instant, instant, *([port['project_id']] * 5)]
         bindings = store.all('SELECT b.* FROM bindings b WHERE ' + active + ' AND ' + identity_scope,
                              [*active_args, *identity_args])
@@ -114,6 +118,7 @@ def mount(app):
             credential = store.one('SELECT * FROM api_keys WHERE id=?', (key['id'],))
             principal = {'id': key['id'], 'kind': 'key', 'role': 'consumer', 'key': credential}
             binding = ctx['bind'](ctx['BindingInput'](service=port['name'], requirements=body.requirements,
-                                  ttl_seconds=body.ttl_seconds), principal)
+                                  ttl_seconds=body.ttl_seconds,required_extensions=body.required_extensions,
+                                  optional_extensions=body.optional_extensions), principal)
         return {'binding': binding, 'key': key, 'key_expires': credential['expires'],
                 'note': 'Store the key now. It is restricted to this service and shown only once.'}

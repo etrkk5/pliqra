@@ -1,0 +1,10 @@
+{
+  "topology": "Caddy + two Pliqra 2.0 replicas + PostgreSQL 18",
+  "fresh_setup": "passed",
+  "shared_authenticated_session_20_requests": "passed",
+  "both_replicas_live": "passed",
+  "metadata_after_one_replica_stopped_20_requests": "passed",
+  "proxy_inference_retries": false,
+  "in_flight_replay_tested": false,
+  "production_database_failover_tested": false
+}

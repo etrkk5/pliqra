@@ -285,7 +285,11 @@ def test_oidc_round_trip_pkce_nonce_and_safe_default_role(workspace):
             return httpx.Response(200, json={"access_token": "test-upstream-token", "token_type": "Bearer", "expires_in": 300, "id_token": signed})
         return httpx.Response(404)
 
-    app.state.oauth.register("oidc_" + provider_id, client_id="pliqra-client", client_secret="test-client-secret", server_metadata_url="https://identity.test/.well-known/openid-configuration", client_kwargs={"scope": "openid email profile", "code_challenge_method": "S256", "transport": httpx.MockTransport(identity_server)})
+    register=app.state.oauth.register
+    def register_identity(name,**kwargs):
+        kwargs['client_kwargs']['transport']=httpx.MockTransport(identity_server)
+        return register(name,**kwargs)
+    app.state.oauth.register=register_identity
     redirect = client.get(f"/auth/oidc/{provider_id}/login", follow_redirects=False)
     assert redirect.status_code == 302
     params = parse_qs(urlsplit(redirect.headers["location"]).query)

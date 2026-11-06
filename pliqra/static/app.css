@@ -144,3 +144,15 @@ dialog::backdrop{background:#17121766}
 [hidden]{display:none!important}
 
 .drawer .guard-decisions th:last-child,.drawer .guard-decisions td:last-child{display:none}.drawer .guard-decisions td{white-space:normal;line-height:1.7}.drawer .guard-decisions td:first-child{max-width:140px}
+/* Workflow and workspace controls share the existing charcoal/orange visual language. */
+.enterprise-tabs{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 24px;padding:6px;background:#fff;border:1px solid var(--line);border-radius:12px;width:fit-content}
+.enterprise-status{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin:0 0 24px}
+.enterprise-status>div{padding:20px;border:1px solid var(--line);border-radius:14px;background:#fff}
+.enterprise-status span{display:block;font-size:11px;color:var(--text-secondary);margin-bottom:9px}
+.enterprise-status strong{font-size:17px;font-weight:600;overflow-wrap:anywhere}
+.enterprise-message{padding:16px;margin-bottom:16px;border:1px solid var(--line);border-radius:12px}
+.table-wrap td small{display:block;margin-top:6px;color:var(--text-secondary);font-size:11px}
+.table-wrap td pre{max-width:480px;max-height:200px;overflow:auto;white-space:pre-wrap}
+.modal-content audio{width:100%;margin:20px 0}
+@media(max-width:900px){.enterprise-status{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:520px){.enterprise-status{grid-template-columns:1fr}.enterprise-tabs{width:100%}}

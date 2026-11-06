@@ -9,7 +9,9 @@ import shutil
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+from .storage_schema import BASE_SCHEMA
+
+SCHEMA_VERSION = 4
 
 
 def uid(prefix=""):
@@ -24,7 +26,8 @@ def encode(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-class Store:
+class SQLiteStore:
+    backend = 'sqlite'
     def __init__(self, directory: Path):
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.directory = directory
@@ -69,66 +72,11 @@ class Store:
             self.conn.close()
             self.lease.close()
             raise RuntimeError('This workspace was created by a newer Pliqra version; use a compatible release or restore its pre-upgrade backup.')
-        self.conn.executescript("""
-        PRAGMA journal_mode=WAL;
-        PRAGMA foreign_keys=ON;
-        PRAGMA busy_timeout=5000;
-        CREATE TABLE IF NOT EXISTS users (
-          id TEXT PRIMARY KEY, email TEXT NOT NULL, name TEXT NOT NULL,
-          password_hash TEXT, role TEXT NOT NULL, issuer TEXT NOT NULL DEFAULT 'local',
-          subject TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created REAL NOT NULL,
-          UNIQUE(issuer,subject));
-        CREATE TABLE IF NOT EXISTS sessions (
-          token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
-          csrf TEXT NOT NULL, expires REAL NOT NULL);
-        CREATE TABLE IF NOT EXISTS connections (
-          id TEXT PRIMARY KEY, name TEXT NOT NULL, endpoint TEXT NOT NULL,
-          provider TEXT NOT NULL, secret TEXT, status TEXT NOT NULL,
-          last_checked REAL, last_error TEXT, created REAL NOT NULL);
-        CREATE TABLE IF NOT EXISTS deployments (
-          id TEXT PRIMARY KEY, connection_id TEXT NOT NULL REFERENCES connections(id),
-          model TEXT NOT NULL, capabilities TEXT NOT NULL, verified TEXT NOT NULL DEFAULT '[]',
-          input_price REAL, output_price REAL, enabled INTEGER NOT NULL DEFAULT 1,
-          UNIQUE(connection_id,model));
-        CREATE TABLE IF NOT EXISTS ports (
-          id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, description TEXT NOT NULL DEFAULT '',
-          deployments TEXT NOT NULL, requirements TEXT NOT NULL DEFAULT '[]',
-          strategy TEXT NOT NULL DEFAULT 'priority', version INTEGER NOT NULL DEFAULT 1,
-          enabled INTEGER NOT NULL DEFAULT 1, created REAL NOT NULL);
-        CREATE TABLE IF NOT EXISTS projects (
-          id TEXT PRIMARY KEY, name TEXT NOT NULL, monthly_budget REAL, created REAL NOT NULL);
-        CREATE TABLE IF NOT EXISTS api_keys (
-          id TEXT PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT UNIQUE NOT NULL,
-          prefix TEXT NOT NULL, project_id TEXT NOT NULL REFERENCES projects(id),
-          allowed_ports TEXT NOT NULL, rpm INTEGER NOT NULL DEFAULT 60,
-          active INTEGER NOT NULL DEFAULT 1, expires REAL, created REAL NOT NULL);
-        CREATE TABLE IF NOT EXISTS events (
-          id TEXT PRIMARY KEY, started REAL NOT NULL, finished REAL, principal TEXT NOT NULL,
-          project_id TEXT, key_id TEXT, port_id TEXT, port_name TEXT, port_version INTEGER,
-          deployment_id TEXT, model TEXT, connection_name TEXT, status TEXT NOT NULL,
-          stream INTEGER NOT NULL, latency_ms REAL, ttft_ms REAL,
-          input_tokens INTEGER, output_tokens INTEGER, usage_source TEXT NOT NULL DEFAULT 'unknown',
-          cost_micros INTEGER, reserved_micros INTEGER NOT NULL DEFAULT 0,
-          decisions TEXT NOT NULL DEFAULT '[]', error TEXT);
-        CREATE INDEX IF NOT EXISTS events_time ON events(started);
-        CREATE INDEX IF NOT EXISTS events_project ON events(project_id,started);
-        CREATE INDEX IF NOT EXISTS events_key ON events(key_id,started);
-        CREATE TABLE IF NOT EXISTS bindings (
-          id TEXT PRIMARY KEY, principal TEXT NOT NULL, port_id TEXT NOT NULL REFERENCES ports(id),
-          version INTEGER NOT NULL, fingerprint TEXT NOT NULL, requirements TEXT NOT NULL,
-          expires REAL NOT NULL, created REAL NOT NULL);
-        CREATE TABLE IF NOT EXISTS identity_providers (
-          id TEXT PRIMARY KEY, name TEXT NOT NULL, issuer TEXT NOT NULL,
-          client_id TEXT NOT NULL, secret TEXT NOT NULL, default_role TEXT NOT NULL DEFAULT 'viewer',
-          active INTEGER NOT NULL DEFAULT 1, created REAL NOT NULL);
-        CREATE TABLE IF NOT EXISTS audit (
-          id TEXT PRIMARY KEY, created REAL NOT NULL, actor TEXT NOT NULL,
-          action TEXT NOT NULL, target TEXT NOT NULL, detail TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-        """)
+        self.conn.executescript(BASE_SCHEMA)
         self.migrate()
+        self.run('UPDATE runtime_nodes SET heartbeat=0')
         # Work interrupted by a restart must remain visibly incomplete, never become a success.
-        self.conn.execute("UPDATE events SET status='interrupted',error='Gateway restarted before completion; usage requires reconciliation',finished=? WHERE status='pending'", (now(),))
+        self.conn.execute("UPDATE events SET updated=strftime('%s','now'),status='interrupted',error='Gateway restarted before completion; usage requires reconciliation',finished=? WHERE status='pending'", (now(),))
         if not self.one("SELECT id FROM projects LIMIT 1"):
             self.run("INSERT INTO projects (id,name,monthly_budget,created) VALUES (?,?,?,?)", ("default", "Default workspace", None, now()))
 
@@ -140,18 +88,42 @@ class Store:
             "projects": {"max_concurrency": "INTEGER NOT NULL DEFAULT 20"},
             "api_keys": {"created_by": "TEXT", "team_id": "TEXT", "gateway_id": "TEXT"},
             "bindings": {"gateway_id": "TEXT", "gateway_fingerprint": "TEXT"},
-            "events": {"request_kind": "TEXT NOT NULL DEFAULT 'inference'", "reconciled_by": "TEXT", "reconciliation_note": "TEXT", "cache_hit": "INTEGER NOT NULL DEFAULT 0", "price_snapshot": "TEXT", "team_id": "TEXT", "actor_user_id": "TEXT", "known_cost_micros": "INTEGER NOT NULL DEFAULT 0"},
+            "events": {"request_kind": "TEXT NOT NULL DEFAULT 'inference'", "reconciled_by": "TEXT", "reconciliation_note": "TEXT", "cache_hit": "INTEGER NOT NULL DEFAULT 0", "price_snapshot": "TEXT", "team_id": "TEXT", "actor_user_id": "TEXT", "known_cost_micros": "INTEGER NOT NULL DEFAULT 0", "node_id": "TEXT"},
             "identity_providers": {"protocol": "TEXT NOT NULL DEFAULT 'oidc'", "config": "TEXT NOT NULL DEFAULT '{}'"},
             "users": {"external_id": "TEXT", "groups": "TEXT NOT NULL DEFAULT '[]'", "username": "TEXT NOT NULL DEFAULT ''"},
         }
         additions["events"].update(gateway_id="TEXT", gateway_name="TEXT", gateway_fingerprint="TEXT", delivery="TEXT")
+        additions['api_keys']['workload_provider_id']='TEXT'
+        additions['users']['enterprise']="TEXT NOT NULL DEFAULT '{}'"
+        additions['bindings']['extensions']="TEXT NOT NULL DEFAULT '[]'"
+        additions['sessions']={'federation_context':"TEXT NOT NULL DEFAULT '{}'"}
+        additions['events'].update(prompt_id='TEXT',prompt_version='INTEGER')
+        additions['events']['updated']='REAL NOT NULL DEFAULT 0'
         with self.transaction():
             for table, columns in additions.items():
-                existing = {row["name"] for row in self.all(f"PRAGMA table_info({table})")}
+                existing = set(self.columns(table))
                 for name, definition in columns.items():
                     if name not in existing:
                         self.run(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
             for statement in [
+                "CREATE TABLE IF NOT EXISTS runtime_nodes (id TEXT PRIMARY KEY,heartbeat REAL NOT NULL)",
+                "CREATE TABLE IF NOT EXISTS organizations (id TEXT PRIMARY KEY,slug TEXT NOT NULL UNIQUE,name TEXT NOT NULL,state TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,created REAL NOT NULL)",
+                "CREATE TABLE IF NOT EXISTS secret_providers (id TEXT PRIMARY KEY,name TEXT NOT NULL,kind TEXT NOT NULL,config TEXT NOT NULL,secret TEXT NOT NULL DEFAULT '',enabled INTEGER NOT NULL DEFAULT 1,version INTEGER NOT NULL DEFAULT 1,created REAL NOT NULL)",
+                "CREATE TABLE IF NOT EXISTS workload_providers (id TEXT PRIMARY KEY,name TEXT NOT NULL,config TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,version INTEGER NOT NULL DEFAULT 1,created REAL NOT NULL)",
+                "CREATE TABLE IF NOT EXISTS workload_assertions (id TEXT PRIMARY KEY,provider_id TEXT NOT NULL,expires REAL NOT NULL)",
+                "CREATE TABLE IF NOT EXISTS auth_attempts (id TEXT PRIMARY KEY,bucket TEXT NOT NULL,created REAL NOT NULL)",
+                "CREATE INDEX IF NOT EXISTS auth_attempts_bucket ON auth_attempts(bucket,created)",
+                "CREATE TABLE IF NOT EXISTS prompts (id TEXT PRIMARY KEY,name TEXT NOT NULL,project_id TEXT NOT NULL REFERENCES projects(id),created REAL NOT NULL)",
+                "CREATE TABLE IF NOT EXISTS prompt_versions (prompt_id TEXT NOT NULL REFERENCES prompts(id),version INTEGER NOT NULL,document TEXT NOT NULL,fingerprint TEXT NOT NULL,actor TEXT NOT NULL,created REAL NOT NULL,PRIMARY KEY(prompt_id,version))",
+                "CREATE TABLE IF NOT EXISTS batches (id TEXT PRIMARY KEY,name TEXT NOT NULL,owner TEXT NOT NULL,principal TEXT NOT NULL,status TEXT NOT NULL,node_id TEXT,cancel_requested INTEGER NOT NULL DEFAULT 0,store_outputs INTEGER NOT NULL,created REAL NOT NULL,expires REAL NOT NULL,finished REAL)",
+                "CREATE TABLE IF NOT EXISTS batch_items (id TEXT PRIMARY KEY,batch_id TEXT NOT NULL REFERENCES batches(id),position INTEGER NOT NULL,operation TEXT NOT NULL,request TEXT NOT NULL,result TEXT,status TEXT NOT NULL,event_id TEXT,error TEXT,next_attempt REAL NOT NULL DEFAULT 0,attempt_count INTEGER NOT NULL DEFAULT 0,UNIQUE(batch_id,position))",
+                "CREATE INDEX IF NOT EXISTS batch_items_queue ON batch_items(batch_id,status,position)",
+                "CREATE TABLE IF NOT EXISTS quality_judges (id TEXT PRIMARY KEY,name TEXT NOT NULL,config TEXT NOT NULL,secret TEXT NOT NULL DEFAULT '',version INTEGER NOT NULL DEFAULT 1,created REAL NOT NULL)",
+                "CREATE TABLE IF NOT EXISTS releases (id TEXT PRIMARY KEY,service_id TEXT NOT NULL,candidate_id TEXT NOT NULL,evaluation_id TEXT NOT NULL,config TEXT NOT NULL,state TEXT NOT NULL,percent INTEGER NOT NULL,version INTEGER NOT NULL,actor TEXT NOT NULL,created REAL NOT NULL)",
+                "CREATE INDEX IF NOT EXISTS releases_service ON releases(service_id,state)",
+                "CREATE TABLE IF NOT EXISTS analytics_targets (id TEXT PRIMARY KEY,secret TEXT NOT NULL,enabled INTEGER NOT NULL,interval_seconds INTEGER NOT NULL,cursor_time REAL NOT NULL DEFAULT 0,cursor_id TEXT NOT NULL DEFAULT '',next_export REAL NOT NULL DEFAULT 0,last_success REAL,last_error TEXT,claim_node TEXT,claim_until REAL)",
+                "CREATE INDEX IF NOT EXISTS events_updated ON events(updated,id)",
+                "CREATE TABLE IF NOT EXISTS runtime_leases (id TEXT PRIMARY KEY,node_id TEXT NOT NULL,kind TEXT NOT NULL,created REAL NOT NULL)",
                 "CREATE TABLE IF NOT EXISTS gateway_profiles (id TEXT PRIMARY KEY,name TEXT NOT NULL,slug TEXT NOT NULL UNIQUE,config TEXT NOT NULL,version INTEGER NOT NULL,created REAL NOT NULL,updated REAL NOT NULL)",
                 "CREATE TABLE IF NOT EXISTS gateway_versions (gateway_id TEXT NOT NULL,version INTEGER NOT NULL,document TEXT NOT NULL,actor TEXT NOT NULL,created REAL NOT NULL,PRIMARY KEY(gateway_id,version))",
                 "CREATE TABLE IF NOT EXISTS guardrails (id TEXT PRIMARY KEY,name TEXT NOT NULL,provider TEXT NOT NULL,config TEXT NOT NULL,secret TEXT,version INTEGER NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,created REAL NOT NULL,updated REAL NOT NULL)",
@@ -182,9 +154,32 @@ class Store:
                 "CREATE TABLE IF NOT EXISTS saml_assertions (id TEXT PRIMARY KEY,expires REAL NOT NULL)",
             ]:
                 self.run(statement)
-            self.run("PRAGMA user_version=3")
-            self.run("UPDATE gateway_requests SET status='interrupted' WHERE status='pending'")
-        self.run("UPDATE evaluations SET status='interrupted',error='Gateway restarted during evaluation',finished=? WHERE status IN ('queued','running')", (now(),))
+            existing=set(self.columns('saml_flows'))
+            for name,definition in {'kind':"TEXT NOT NULL DEFAULT 'login'",'user_id':'TEXT'}.items():
+                if name not in existing:self.run(f'ALTER TABLE saml_flows ADD COLUMN {name} {definition}')
+            existing=set(self.columns('evaluations'))
+            for name,definition in {'node_id':'TEXT','cancel_requested':'INTEGER NOT NULL DEFAULT 0','dataset_hash':'TEXT','judge_id':'TEXT','min_judge_score':'REAL'}.items():
+                if name not in existing:self.run(f'ALTER TABLE evaluations ADD COLUMN {name} {definition}')
+            self.set_schema_version(SCHEMA_VERSION)
+            if self.backend=='sqlite':self.run("UPDATE gateway_requests SET status='interrupted' WHERE status='pending'")
+        if self.backend=='sqlite':self.run("UPDATE evaluations SET status='interrupted',error='Gateway restarted during evaluation',finished=? WHERE status IN ('queued','running')", (now(),))
+
+    def columns(self, table):
+        return [row['name'] for row in self.all(f'PRAGMA table_info({table})')]
+
+    def tables(self):
+        return [r['name'] for r in self.all("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
+
+    def primary_key(self,table):
+        return [r['name'] for r in sorted(self.all(f'PRAGMA table_info({table})'),key=lambda r:r['pk']) if r['pk']]
+
+    def set_schema_version(self, value):
+        self.run(f'PRAGMA user_version={int(value)}')
+
+    def database_size(self):
+        return (self.directory/'pliqra.sqlite3').stat().st_size
+
+    def clock(self):return now()
 
     def setting(self, key, default=None):
         row = self.one("SELECT value FROM settings WHERE key=?", (key,))
@@ -206,10 +201,12 @@ class Store:
             return self.conn.execute(sql, args)
 
     def insert(self, table, fields):
+        if table=='events':fields={**fields,'updated':self.clock()}
         names = list(fields)
         self.run(f"INSERT INTO {table} ({','.join(names)}) VALUES ({','.join('?' for _ in names)})", tuple(fields.values()))
 
     def update(self, table, record_id, fields):
+        if table=='events':fields={**fields,'updated':self.clock()}
         self.run(f"UPDATE {table} SET {','.join(name+'=?' for name in fields)} WHERE id=?", (*fields.values(), record_id))
 
     @contextmanager
@@ -229,3 +226,12 @@ class Store:
     def close(self):
         self.conn.close()
         self.lease.close()
+
+
+def Store(directory, database_url=None, schema=None):
+    from .config import env
+    url=database_url if database_url is not None else env('PLIQRA_DATABASE_URL','')
+    if url:
+        from .postgres import PostgresStore
+        return PostgresStore(directory,url,schema or env('PLIQRA_DATABASE_SCHEMA','pliqra'))
+    return SQLiteStore(directory)

@@ -24,6 +24,12 @@ class ContractChanged(PliqraError):
     pass
 
 
+def checked_json(response):
+    value=response.read(32_000_001)
+    if len(value)>32_000_000:raise PliqraError(502,'Response exceeded 32 MB')
+    return json.loads(value)
+
+
 class Pliqra:
     def __init__(self,base_url,api_key,timeout=90):
         parsed=urlsplit(base_url)
@@ -45,17 +51,20 @@ class Pliqra:
             raise cls(exc.code,detail) from None
 
     def services(self):
-        with self.request(self.metadata()['discovery']) as response:return json.load(response)['services']
+        with self.request(self.metadata()['discovery']) as response:return checked_json(response)['services']
 
     def metadata(self):
         if self.protocol is None:
-            with self.request('/.well-known/pliqra') as response:self.protocol=json.load(response)
+            with self.request('/.well-known/pliqra') as response:self.protocol=checked_json(response)
             if self.protocol.get('protocol')!='pliqra/0.1-draft':raise PliqraError(422,'Unsupported Pliqra protocol version')
         return self.protocol
 
-    def connect(self,service,requirements=None,ttl_seconds=3600):
-        with self.request(self.metadata()['bind'],{'service':service,'requirements':requirements or ['chat'],'ttl_seconds':ttl_seconds}) as response:
-            return Connection(self,json.load(response))
+    def connect(self,service,requirements=None,ttl_seconds=3600,required_extensions=None,optional_extensions=None):
+        required=required_extensions or []
+        with self.request(self.metadata()['bind'],{'service':service,'requirements':requirements if requirements is not None else ['chat'],'ttl_seconds':ttl_seconds,'required_extensions':required,'optional_extensions':optional_extensions or []}) as response:
+            binding=checked_json(response)
+            if set(required)-set(binding.get('extensions',[])):raise PliqraError(422,'Server did not negotiate all required extensions')
+            return Connection(self,binding)
 
 
 class Connection:
@@ -64,13 +73,30 @@ class Connection:
 
     def complete(self,messages,**parameters):
         body={**parameters,'model':self.binding['service'],'messages':messages,'stream':False}
-        with self.client.request(self.binding['invoke'],body) as response:return json.load(response)
+        with self.client.request(self.binding['invoke'],body) as response:return checked_json(response)
+
+    def operation(self,operation,**parameters):
+        if 'pliqra.operations/1' not in self.binding.get('extensions',[]):raise PliqraError(422,'Negotiate pliqra.operations/1 when connecting')
+        if operation not in ('embeddings','speech','transcription'):raise ValueError('Unsupported operation')
+        path='/protocol/v1/bindings/'+self.binding['id']+'/operations/'+operation
+        with self.client.request(path,{'model':self.binding['service'],**parameters}) as response:
+            value=response.read(32_000_001)
+            if len(value)>32_000_000:raise PliqraError(502,'Response exceeded 32 MB')
+            return json.loads(value) if 'json' in response.headers.get('Content-Type','') else value
+
+    def batch(self,items,name='Application batch',store_outputs=True):
+        if 'pliqra.batches/1' not in self.binding.get('extensions',[]):raise PliqraError(422,'Negotiate pliqra.batches/1 when connecting')
+        body={'name':name,'store_outputs':store_outputs,'items':[{'binding_id':self.binding['id'],'custom_id':str(index),'body':{'model':self.binding['service'],**item}} for index,item in enumerate(items)]}
+        with self.client.request('/api/v1/batches',body) as response:return checked_json(response)
 
     def stream(self,messages,**parameters):
         body={**parameters,'model':self.binding['service'],'messages':messages,'stream':True}
         terminal=False
         with self.client.request(self.binding['invoke'],body) as response:
-            for raw in response:
+            while True:
+                raw=response.readline(1_000_001)
+                if not raw:break
+                if len(raw)>1_000_000:raise PliqraError(502,'Stream line exceeded 1 MB')
                 line=raw.decode('utf-8').strip()
                 if not line.startswith('data:'):continue
                 data=line[5:].strip()

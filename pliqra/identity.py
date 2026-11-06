@@ -2,6 +2,7 @@ import base64
 import json
 import re
 import secrets
+import zlib
 from datetime import datetime, timezone
 from urllib.parse import urlsplit, parse_qs
 
@@ -9,6 +10,7 @@ from fastapi import Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from onelogin.saml2.auth import OneLogin_Saml2_Auth
 from onelogin.saml2.settings import OneLogin_Saml2_Settings
+from onelogin.saml2.logout_request import OneLogin_Saml2_Logout_Request
 from pydantic import BaseModel, Field
 from typing import Annotated, Literal
 
@@ -18,6 +20,8 @@ from .security import digest, endpoint_url
 
 USER_SCHEMA="urn:ietf:params:scim:schemas:core:2.0:User"
 GROUP_SCHEMA="urn:ietf:params:scim:schemas:core:2.0:Group"
+ENTERPRISE_SCHEMA='urn:ietf:params:scim:schemas:extension:enterprise:2.0:User'
+ENTERPRISE_FIELDS={'employeeNumber','costCenter','organization','division','department','manager'}
 LIST_SCHEMA="urn:ietf:params:scim:api:messages:2.0:ListResponse"
 
 
@@ -29,6 +33,7 @@ class SamlInput(BaseModel):
     email_attribute: str="email"
     name_attribute: str="displayName"
     groups_attribute: str="groups"
+    slo_url:str=''
 
 
 class IdentityConfig(BaseModel):
@@ -38,6 +43,7 @@ class IdentityConfig(BaseModel):
     subject_claim: Annotated[str,Field(min_length=1,max_length=100)]="sub"
     groups_claim: Annotated[str,Field(min_length=1,max_length=100)]="groups"
     certificate: Annotated[str|None,Field(max_length=20000)]=None
+    slo_url:Annotated[str|None,Field(max_length=2000)]=None
 
 
 class GroupRule(BaseModel):
@@ -75,6 +81,9 @@ def federated_account(store,provider,info):
 def mount(app):
     ctx=app.state.context
     store,vault,admin=ctx["store"],ctx["vault"],ctx["admin"]
+    saml_cookie='plq_saml_'+ctx['organization']['id'] if ctx.get('organization') else 'plq_saml'
+    saml_path=ctx.get('base_path','')+'/auth/saml/'
+    slo_cookie=saml_cookie+'_logout'
 
     @app.post("/api/v1/identity-providers/saml",tags=["Identity"],status_code=201)
     def add_saml(body:SamlInput,p=Depends(admin)):
@@ -86,6 +95,7 @@ def mount(app):
             pem=certificate.public_bytes(Encoding.PEM).decode()
         except ValueError:raise HTTPException(422,"Enter a valid, unexpired PEM signing certificate")
         endpoint_url(body.sso_url)
+        if body.slo_url and not endpoint_url(body.slo_url).startswith('https://'):raise HTTPException(422,'SAML logout requires HTTPS')
         from cryptography.hazmat.primitives.asymmetric import rsa
         from cryptography.hazmat.primitives import hashes, serialization
         from cryptography.x509.oid import NameOID
@@ -95,6 +105,7 @@ def mount(app):
         sp_cert=x509.CertificateBuilder().subject_name(subject).issuer_name(subject).public_key(private.public_key()).serial_number(x509.random_serial_number()).not_valid_before(datetime.now(timezone.utc)-timedelta(minutes=5)).not_valid_after(datetime.now(timezone.utc)+timedelta(days=3650)).sign(private,hashes.SHA256())
         config={"sso_url":body.sso_url,"certificate":pem,"email_attribute":body.email_attribute,"name_attribute":body.name_attribute,"groups_attribute":body.groups_attribute,"subject_claim":"sub","groups_claim":"groups","sp_certificate":sp_cert.public_bytes(Encoding.PEM).decode(),"sp_private_key":vault.encrypt(private.private_bytes(serialization.Encoding.PEM,serialization.PrivateFormat.PKCS8,serialization.NoEncryption()).decode())}
         record_id=uid("idp_")
+        config['slo_url']=body.slo_url
         store.insert("identity_providers",{"id":record_id,"name":body.name,"issuer":body.entity_id,"client_id":"","secret":"","default_role":"viewer","protocol":"saml","config":encode(config),"created":now()})
         store.audit(p["id"],"identity.saml_created",record_id)
         return {"id":record_id,"metadata_path":f"/auth/saml/{record_id}/metadata","acs_path":f"/auth/saml/{record_id}/acs"}
@@ -105,6 +116,10 @@ def mount(app):
         if not row:raise HTTPException(404,"Identity provider not found")
         config=json.loads(row["config"])
         config.update(subject_claim=body.subject_claim,groups_claim=body.groups_claim)
+        if body.slo_url is not None:
+            if row['protocol']!='saml':raise HTTPException(422,'SAML logout is only available for SAML providers')
+            if body.slo_url and not endpoint_url(body.slo_url).startswith('https://'):raise HTTPException(422,'SAML logout requires HTTPS')
+            config['slo_url']=body.slo_url
         if body.certificate is not None:
             from cryptography import x509
             try:x509.load_pem_x509_certificate(body.certificate.encode())
@@ -161,6 +176,10 @@ def mount(app):
         if config.get("sp_private_key"):
             settings["sp"].update(x509cert=config["sp_certificate"],privateKey=vault.decrypt(config["sp_private_key"]))
             settings["security"]["authnRequestsSigned"]=True
+        if config.get('slo_url'):
+            settings['sp']['singleLogoutService']={'url':origin+f'/auth/saml/{record_id}/sls','binding':'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect'}
+            settings['idp']['singleLogoutService']={'url':config['slo_url'],'binding':'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect'}
+            settings['security'].update(logoutRequestSigned=True,logoutResponseSigned=True)
         settings["security"]["rejectDeprecatedAlgorithm"]=True
         if urlsplit(origin).hostname in ('localhost','127.0.0.1','::1'):
             settings['security']['allowSingleLabelDomains']=True
@@ -184,7 +203,7 @@ def mount(app):
         target=toolkit.login(return_to=relay)
         store.insert("saml_flows",{"id":digest(relay),"provider_id":record_id,"request_id":toolkit.get_last_request_id(),"expires":now()+300})
         response=RedirectResponse(target,302)
-        response.set_cookie("plq_saml",relay,httponly=True,secure=True,samesite="none",max_age=300,path="/auth/saml/")
+        response.set_cookie(saml_cookie,relay,httponly=True,secure=True,samesite="none",max_age=300,path=saml_path)
         return response
 
     @app.post("/auth/saml/{record_id}/acs",tags=["Identity"])
@@ -193,8 +212,8 @@ def mount(app):
         raw=(await request.body()).decode()
         values={key:entries[0] for key,entries in parse_qs(raw).items()}
         relay=values.get("RelayState","")
-        if not relay or not secrets.compare_digest(request.cookies.get("plq_saml",""),relay):raise HTTPException(403,"SAML browser state is missing or invalid; use HTTPS and start sign-in again")
-        flow=store.one("SELECT * FROM saml_flows WHERE id=? AND provider_id=? AND expires>?",(digest(relay),record_id,now()))
+        if not relay or not secrets.compare_digest(request.cookies.get(saml_cookie,""),relay):raise HTTPException(403,"SAML browser state is missing or invalid; use HTTPS and start sign-in again")
+        flow=store.one("SELECT * FROM saml_flows WHERE id=? AND provider_id=? AND kind='login' AND expires>?",(digest(relay),record_id,now()))
         if not flow:raise HTTPException(403,"SAML sign-in expired or was already used")
         toolkit=OneLogin_Saml2_Auth(saml_request(request,values),old_settings=settings)
         try:
@@ -216,8 +235,84 @@ def mount(app):
             value=attributes.get(attribute,[])
             return value[0] if value else fallback
         account=federated_account(store,provider,{"sub":name_id,"email":first(config.get("email_attribute","email")),"name":first(config.get("name_attribute","displayName"),name_id),"groups":attributes.get(config.get("groups_attribute","groups"),[])})
-        response=ctx["session_response"](account,request)
-        response.delete_cookie("plq_saml",path="/auth/saml/")
+        response=ctx["session_response"](account,request,{'name_id':name_id,'name_id_format':toolkit.get_nameid_format(),'session_index':toolkit.get_session_index()})
+        response.delete_cookie(saml_cookie,path=saml_path)
+        return response
+
+    @app.post('/api/v1/identity-providers/{record_id}/logout',tags=['Identity'])
+    def saml_logout(record_id:str,request:Request,p=Depends(ctx['user'])):
+        if p['user']['issuer']!=record_id:raise HTTPException(403,'Use the provider that authenticated this session')
+        _,config,settings=saml_settings(request,record_id)
+        if not config.get('slo_url'):raise HTTPException(422,'Configure the provider logout URL first')
+        row=store.one('SELECT federation_context FROM sessions WHERE token_hash=?',(p['session_hash'],))
+        context=json.loads(row['federation_context'])
+        if not context.get('name_id'):raise HTTPException(409,'Sign in again to establish a logout-capable SAML session')
+        toolkit=OneLogin_Saml2_Auth(saml_request(request),old_settings=settings)
+        relay=secrets.token_urlsafe(32)
+        target=toolkit.logout(return_to=relay,name_id=context['name_id'],session_index=context.get('session_index'),name_id_format=context.get('name_id_format'))
+        with store.transaction():
+            store.insert('saml_flows',{'id':digest(relay),'provider_id':record_id,'request_id':toolkit.get_last_request_id(),'expires':now()+300,'kind':'logout','user_id':p['id']})
+            store.run('DELETE FROM sessions WHERE token_hash=?',(p['session_hash'],))
+            store.audit(p['id'],'session.saml_logout_started',record_id)
+        response=JSONResponse({'redirect_url':target})
+        response.set_cookie(slo_cookie,relay,httponly=True,secure=True,samesite='lax',max_age=300,path=saml_path)
+        response.delete_cookie(ctx['cookie_name'],path=ctx.get('base_path') or '/')
+        return response
+
+    @app.get('/auth/saml/{record_id}/sls',tags=['Identity'])
+    def saml_sls(record_id:str,request:Request):
+        _,config,settings=saml_settings(request,record_id)
+        if not config.get('slo_url'):raise HTTPException(404,'SAML logout is not configured')
+        query=dict(request.query_params)
+        if any(len(value)>100000 for value in query.values()) or not query.get('Signature'):raise HTTPException(403,'A signed SAML logout message is required')
+        try:
+            encoded=query.get('SAMLResponse') or query.get('SAMLRequest')
+            inflater=zlib.decompressobj(-15)
+            xml=inflater.decompress(base64.b64decode(encoded,validate=True),256001)
+            if len(xml)>256000 or not inflater.eof or inflater.unconsumed_tail:raise ValueError()
+            from lxml import etree
+            root=etree.fromstring(xml,etree.XMLParser(resolve_entities=False,no_network=True))
+            stamp=datetime.fromisoformat(root.get('IssueInstant','').replace('Z','+00:00'))
+            if stamp.tzinfo is None or abs(now()-stamp.timestamp())>300:raise ValueError()
+        except Exception:raise HTTPException(403,'SAML logout is oversized, malformed or outside its freshness window')
+        flow=None
+        if query.get('SAMLResponse'):
+            relay=query.get('RelayState','')
+            if not relay or not secrets.compare_digest(request.cookies.get(slo_cookie,''),relay):raise HTTPException(403,'SAML logout browser state is invalid')
+            flow=store.one("SELECT * FROM saml_flows WHERE id=? AND provider_id=? AND kind='logout' AND expires>?",(digest(relay),record_id,now()))
+            if not flow:raise HTTPException(403,'SAML logout expired or was already completed')
+        settings['security']['wantMessagesSigned']=True
+        toolkit=OneLogin_Saml2_Auth(saml_request(request),old_settings=settings)
+        try:
+            target=toolkit.process_slo(keep_local_session=True,request_id=flow['request_id'] if flow else None)
+            if toolkit.get_errors():raise ValueError()
+            message=toolkit.get_last_message_id()
+            if not message:raise ValueError()
+            name_id=None;indexes=[]
+            if query.get('SAMLRequest'):
+                xml=toolkit.get_last_request_xml()
+                name_id=OneLogin_Saml2_Logout_Request.get_nameid_data(xml,settings['sp'].get('privateKey'))['Value']
+                indexes=OneLogin_Saml2_Logout_Request.get_session_indexes(xml)
+        except Exception:
+            store.audit('anonymous','saml.logout_validation_failed',record_id)
+            raise HTTPException(403,'SAML logout signature or message validation failed')
+        with store.transaction():
+            replay='slo:'+message
+            if store.one('SELECT id FROM saml_assertions WHERE id=?',(replay,)):raise HTTPException(403,'SAML logout was already processed')
+            if flow and not store.one('SELECT id FROM saml_flows WHERE id=?',(flow['id'],)):raise HTTPException(403,'SAML logout was already processed')
+            store.insert('saml_assertions',{'id':replay,'expires':now()+86400})
+            if flow:
+                store.run('DELETE FROM saml_flows WHERE id=?',(flow['id'],))
+                store.run('DELETE FROM sessions WHERE user_id=?',(flow['user_id'],))
+            else:
+                sessions=store.all('SELECT s.token_hash,s.federation_context FROM sessions s JOIN users u ON u.id=s.user_id WHERE u.issuer=? AND u.subject=?',(record_id,name_id))
+                for session in sessions:
+                    if not indexes or json.loads(session['federation_context']).get('session_index') in indexes:
+                        store.run('DELETE FROM sessions WHERE token_hash=?',(session['token_hash'],))
+            store.audit('federation','session.saml_logout_completed',record_id)
+        response=RedirectResponse(target or ctx.get('base_path','')+'/',302)
+        response.delete_cookie(slo_cookie,path=saml_path)
+        response.delete_cookie(ctx['cookie_name'],path=ctx.get('base_path') or '/')
         return response
 
     @app.post("/api/v1/identity-providers/{record_id}/scim-token",tags=["Identity"])
@@ -257,7 +352,8 @@ def mount(app):
         return scim_json({"schemas":["urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig"],"patch":{"supported":True},"bulk":{"supported":False,"maxOperations":0,"maxPayloadSize":0},"filter":{"supported":True,"maxResults":1000},"changePassword":{"supported":False},"sort":{"supported":False},"etag":{"supported":False},"authenticationSchemes":[{"type":"oauthbearertoken","name":"Scoped provisioning token","description":"Provider-scoped bearer token","primary":True}]})
 
     def render_scim_user(row):
-        return {"schemas":[USER_SCHEMA],"id":row["id"],"externalId":row["external_id"],"userName":row["username"] or row["subject"],"displayName":row["name"],"name":{"formatted":row["name"]},"emails":[{"value":row["email"],"primary":True}],"active":bool(row["active"]),"meta":{"resourceType":"User"}}
+        enterprise=json.loads(row.get('enterprise') or '{}')
+        return {"schemas":[USER_SCHEMA]+([ENTERPRISE_SCHEMA] if enterprise else []),"id":row["id"],"externalId":row["external_id"],"userName":row["username"] or row["subject"],"displayName":row["name"],"name":{"formatted":row["name"]},"emails":[{"value":row["email"],"primary":True}],"active":bool(row["active"]),"meta":{"resourceType":"User"},**({ENTERPRISE_SCHEMA:enterprise} if enterprise else {})}
 
     def render_scim_group(row):
         return {"schemas":[GROUP_SCHEMA],"id":row["id"],"externalId":row["external_id"],"displayName":row["name"],"members":[{"value":value} for value in json.loads(row["members"])],"meta":{"resourceType":"Group"}}
@@ -273,13 +369,13 @@ def mount(app):
         schema_schema="urn:ietf:params:scim:schemas:core:2.0:Schema"
         type_schema="urn:ietf:params:scim:schemas:core:2.0:ResourceType"
         if resource=='ResourceTypes':
-            return [{'schemas':[type_schema],'id':name,'name':name,'endpoint':'/'+name+'s','schema':schema,'schemaExtensions':[],'meta':{'resourceType':'ResourceType'}} for name,schema in [('User',USER_SCHEMA),('Group',GROUP_SCHEMA)]]
+            return [{'schemas':[type_schema],'id':name,'name':name,'endpoint':'/'+name+'s','schema':schema,'schemaExtensions':[{'schema':ENTERPRISE_SCHEMA,'required':False}] if name=='User' else [],'meta':{'resourceType':'ResourceType'}} for name,schema in [('User',USER_SCHEMA),('Group',GROUP_SCHEMA)]]
         def attr(name,kind='string',multi=False,required=False,sub=None):
             value={'name':name,'type':kind,'multiValued':multi,'required':required,'caseExact':False,'mutability':'readWrite','returned':'default','uniqueness':'none'}
             if sub:value['subAttributes']=sub
             return value
         common=[attr('externalId')]
-        return [{'schemas':[schema_schema],'id':USER_SCHEMA,'name':'User','attributes':common+[attr('userName',required=True),attr('displayName'),attr('active','boolean'),attr('name','complex',sub=[attr('formatted'),attr('givenName'),attr('familyName')]),attr('emails','complex',True,sub=[attr('value'),attr('primary','boolean'),attr('type')])],'meta':{'resourceType':'Schema'}}, {'schemas':[schema_schema],'id':GROUP_SCHEMA,'name':'Group','attributes':common+[attr('displayName',required=True),attr('members','complex',True,sub=[attr('value'),attr('display')])],'meta':{'resourceType':'Schema'}}]
+        return [{'schemas':[schema_schema],'id':USER_SCHEMA,'name':'User','attributes':common+[attr('userName',required=True),attr('displayName'),attr('active','boolean'),attr('name','complex',sub=[attr('formatted'),attr('givenName'),attr('familyName')]),attr('emails','complex',True,sub=[attr('value'),attr('primary','boolean'),attr('type')])],'meta':{'resourceType':'Schema'}}, {'schemas':[schema_schema],'id':GROUP_SCHEMA,'name':'Group','attributes':common+[attr('displayName',required=True),attr('members','complex',True,sub=[attr('value'),attr('display')])],'meta':{'resourceType':'Schema'}},{'schemas':[schema_schema],'id':ENTERPRISE_SCHEMA,'name':'EnterpriseUser','attributes':[attr(name) for name in sorted(ENTERPRISE_FIELDS-{'manager'})]+[attr('manager','complex',sub=[attr('value'),attr('$ref'),attr('displayName')])],'meta':{'resourceType':'Schema'}}]
 
     @app.get("/scim/v2/{provider_id}/{resource}",tags=["Provisioning"])
     def scim_list(provider_id:str,resource:str,request:Request,startIndex:int=1,count:int=100,filter:str=""):
@@ -322,7 +418,13 @@ def mount(app):
         email=next((item.get("value","") for item in emails if isinstance(item,dict) and item.get("primary")),"") or (emails[0].get("value","") if emails and isinstance(emails[0],dict) else "")
         active=body.get("active",True)
         if not isinstance(active,bool):raise ValueError("active must be a boolean")
-        return {"subject":subject,"username":str(body.get("userName") or subject)[:512],"external_id":str(body.get("externalId") or subject),"email":str(email)[:254],"name":str(body.get("displayName") or body.get("name",{}).get("formatted") or body.get("userName") or subject)[:100],"active":int(active)}
+        enterprise=body.get(ENTERPRISE_SCHEMA,{})
+        if not isinstance(enterprise,dict) or set(enterprise)-ENTERPRISE_FIELDS:raise ValueError('Unsupported enterprise user attribute')
+        for key,value in enterprise.items():
+            if key=='manager':
+                if not isinstance(value,dict) or set(value)-{'value','$ref','displayName'} or any(not isinstance(v,str) or len(v)>512 for v in value.values()):raise ValueError('Invalid enterprise manager')
+            elif not isinstance(value,str) or len(value)>512:raise ValueError('Invalid enterprise user attribute')
+        return {"subject":subject,"username":str(body.get("userName") or subject)[:512],"external_id":str(body.get("externalId") or subject),"email":str(email)[:254],"name":str(body.get("displayName") or body.get("name",{}).get("formatted") or body.get("userName") or subject)[:100],"active":int(active),'enterprise':encode(enterprise)}
 
     def group_fields(body,provider_id):
         name=body.get("displayName")
@@ -378,6 +480,19 @@ def mount(app):
                     elif path in ("active","displayName","userName","externalId","emails","name"):
                         if operation=="remove":current.pop(path,None)
                         else:current[path]=value
+                    elif resource=='Users' and (path==ENTERPRISE_SCHEMA or path.startswith(ENTERPRISE_SCHEMA+':')):
+                        if path==ENTERPRISE_SCHEMA:
+                            if operation=='remove':current.pop(ENTERPRISE_SCHEMA,None)
+                            else:current[ENTERPRISE_SCHEMA]=value
+                        else:
+                            parts=path[len(ENTERPRISE_SCHEMA)+1:].split('.')
+                            if len(parts)>2 or parts[0] not in ENTERPRISE_FIELDS or len(parts)==2 and parts[0]!='manager':raise ValueError('Unsupported enterprise path')
+                            extension=current.setdefault(ENTERPRISE_SCHEMA,{})
+                            if len(parts)==2:
+                                target=extension.setdefault('manager',{});key=parts[1]
+                            else:target=extension;key=parts[0]
+                            if operation=='remove':target.pop(key,None)
+                            else:target[key]=value
                     elif resource=="Groups" and path=="members":
                         if operation=="remove":current["members"]=[]
                         elif operation=="replace":current["members"]=value

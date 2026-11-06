@@ -35,7 +35,7 @@ class Handler(BaseHTTPRequestHandler):
         return hashlib.sha256(json.dumps(value,sort_keys=True).encode()).hexdigest()
 
     def do_GET(self):
-        if self.path=='/.well-known/pliqra':return self.send_json(200,{'protocol':'pliqra/0.1-draft','discovery':'/protocol/v1/services','bind':'/protocol/v1/bindings'})
+        if self.path=='/.well-known/pliqra':return self.send_json(200,{'protocol':'pliqra/0.1-draft','discovery':'/protocol/v1/services','bind':'/protocol/v1/bindings','extensions':{},'conformance_profile':'pliqra-core/1'})
         if not self.authenticated():return self.send_json(401,{'detail':'Access key required'})
         if self.path=='/protocol/v1/services':return self.send_json(200,{'protocol':'pliqra/0.1-draft','services':[{'name':'reference-chat','id':'reference-chat','version':1,'fingerprint':self.fingerprint(),'requirements':['chat'],'deployments':[{'model':os.environ.get('REFERENCE_MODEL'),'capabilities':['chat','streaming'],'verified':[]}],'readiness':'ready','invocation':{'interface':'openai-chat-completions','model':'reference-chat','path':'/v1/chat/completions'}}]})
         self.send_json(404,{'detail':'Not found'})
@@ -48,11 +48,13 @@ class Handler(BaseHTTPRequestHandler):
             body=json.loads(self.rfile.read(length))
         except (ValueError,TypeError):return self.send_json(400,{'detail':'Invalid JSON request'})
         if self.path=='/protocol/v1/bindings':
+            if body.get('required_extensions'):return self.send_json(422,{'detail':{'code':'unsupported_extensions','supported':[]}})
             required=body.get('requirements',[])
             if body.get('service')!='reference-chat':return self.send_json(404,{'detail':'Service not found'})
             if not isinstance(required,list) or set(required)-{'chat','streaming'}:return self.send_json(422,{'detail':'Unsupported capability'})
             record_id='bind_'+secrets.token_hex(12)
             record={'id':record_id,'service':'reference-chat','version':1,'fingerprint':self.fingerprint(),'expires':time.time()+min(86400,max(60,int(body.get('ttl_seconds',3600)))),'invoke':f'/protocol/v1/bindings/{record_id}/invoke','requirements':required}
+            record['extensions']=[]
             with self.lock:self.bindings[record_id]=record
             return self.send_json(201,record)
         if self.path.startswith('/protocol/v1/bindings/') and self.path.endswith('/invoke'):

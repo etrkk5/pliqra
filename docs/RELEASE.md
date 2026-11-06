@@ -1,65 +1,43 @@
-# Pliqra 1.2 — validation record
+# Pliqra 2.0.0 — validation and boundaries
 
-Baseline validated locally on 5 November 2026; gateway/guardrail additions validated on 6 November 2026. This record describes observed behavior, not a security certification or a claim of every-provider compatibility.
+Validated 6 November 2026. This record separates implemented behavior, real local interoperability and synthetic provider fixtures. The [1.2 record](RELEASE_1_2.md) is preserved as history.
 
-## Automated checks
+## Delivered scope
 
-- 92 tests pass on host Python 3.14 and in the Linux/Python 3.13 container.
-- Coverage includes OpenAI-compatible/Ollama chat, fragmented Unicode streaming, incomplete streams, cancellation/accounting paths, pre-stream fallback, service fingerprints, revoked/expired/scoped keys, RPM/budget limits, project/team authorization and admin rollups, encrypted optional content/cache/backup, restore, interrupted-restore crash recovery and session invalidation, SCIM lifecycle, signed/tampered/replayed SAML responses, asynchronous evaluations and positive function/structured-output/streaming capability probes.
-- Dependency deprecation warnings remain in Authlib/httpx and the SAML toolkit; no failing assertions are suppressed.
-- The Docker runtime runs as UID/GID 10001, persists a named volume and reports healthy. Its SAML XML signature runtime imports successfully (xmlsec 1.3.18 / libxml2 2.14.6 on the tested Linux ARM64 build).
+The [roadmap delivery table](ROADMAP.md) now links every engineering track to code, console/API controls, tests and an operating guide. Default installation remains one Docker image with SQLite. The optional topology adds PostgreSQL, shared-state replicas, distributed admission, independent organizations and metadata analytics. Model operations, stateless native interfaces, prompts, batches, external judges, gated canaries, identity/secrets and language clients are included.
 
-Native HTTPS was exercised in a separate temporary container using a test certificate explicitly trusted by the client, with hostname verification enabled. The container health check also supports native TLS.
+## Automated validation
 
-## Browser checks
+- **140 Python tests pass** on host Python 3.14 and Linux/Python 3.13 in the final Docker image, each with a real PostgreSQL 18 instance. The suite includes seven real database/replica cases; without a database URL those seven integration cases explicitly skip.
+- JavaScript client: **8 checks pass**, including fragmented Unicode SSE, incomplete streams, contract changes, extension negotiation, local-path enforcement and operation transport.
+- Go client: **2 tests pass**, including discovery/binding/streaming and contract/error boundaries.
+- The independent **pliqra-core/1** executable profile passes **9 checks against each** of Pliqra and the separate standard-library reference server over real local HTTP. Provider outputs are synthetic. Reports: [gateway](evidence/gateway-core.json), [reference](evidence/reference-core.json).
+- JavaScript/Node 22 and Go 1.25 also passed discovery, binding, completion and terminal streaming against the running synthetic gateway over real HTTP ([record](evidence/language-clients.json)).
+- CI runs Python 3.13/3.14, real PostgreSQL integration, JavaScript/Go and a fresh default Docker workspace. Python source compilation and console JavaScript parsing pass.
+- Dependency deprecation warnings remain in Authlib/httpx and SAML tooling. No failing assertion is suppressed.
 
-A separate workspace at port 8081, with a clearly synthetic upstream, was used for all sample traffic. The user workspace at port 8088 was not seeded with demo accounts or models.
+Regression coverage includes shared request/concurrency admission across replicas; fencing/reconnect; encrypted atomic restore with rollback; metadata upsert after reconciliation; organization/account/session isolation; versioned prompts and durable restart; batch authorization/encryption; changed/failed quality evidence; canary allocation/promotion/rollback; native routes sharing guardrails/quotas; vector/audio boundaries; signed workload identity and replay; secret rotation/prefix restrictions; signed SAML logout and SCIM enterprise provisioning.
 
-Verified: administrator sign-in; overview; usage/team/key breakdowns; team-to-request drill-down; individual attempt/timing/usage details; audited captured-content inspection; service policy dialog; application capability-binding wizard and generated invocation; evaluation creation/execution/results; operations; identity configuration entry points; settings/client/specification links; project/team-attributed streaming playground. The sidebar also operated in a narrow viewport. The charcoal/orange theme is preserved.
+## Real local integrations
 
-The focused three-step overview was exercised from an empty workspace through endpoint discovery, the first real streaming request, and automatic creation of an application key plus binding. Changing service policy produced a visible renewal notice and an HTTP 409 for the old binding. Rebinding the same application identity through the console cleared the notice. Fresh screenshots also cover services, request details and cumulative team-filtered reporting with advanced navigation collapsed.
+**Keycloak 26.8.2** ran in a disposable realm over HTTPS using an explicitly trusted local CA, with certificate and hostname verification enabled. Discovery, PKCE S256, nonce, signed ID-token login, safe viewer role and callback replay rejection passed. [Machine-readable record](evidence/keycloak-26.8.2.json). Custom CA support was added without disabling certificate verification.
 
-Five additional regression tests cover retained inference evidence, atomic key-and-binding creation with rollback on unsupported capabilities, service-restricted generated credentials, scoped onboarding visibility, revoked credentials and removed project access, renewal after service changes, and HTTP 409 before upstream access when a service is renamed or its input limit is tightened.
+**Caddy + two gateway containers + PostgreSQL 18** passed fresh setup, shared authenticated sessions over 20 requests, both-replica status, synthetic upstream invocation and populated onboarding/API views. After one gateway was stopped and active health checks converged, 20 subsequent metadata requests succeeded through the survivor. Proxy inference retries are disabled. This does not establish in-flight request recovery or database failover. [Record](evidence/two-replica-topology.json).
 
-## Gateway and guardrail validation
+The default non-root Docker image starts from an empty workspace and exposes health/discovery/initial setup and all client downloads ([record](evidence/fresh-docker.json)). Linux/Python 3.13 runs the same test suite with real PostgreSQL. Separate test storage and ports were used; the existing user workspace was never started or seeded.
 
-Sixteen additional tests exercise policy-bound keys on named/standard/protocol paths, scoped catalogs, atomic concurrent admission, token reservations and settlement, per-owner quotas across keys and rolling expiry, input blocks without model usage, output blocking before SSE delivery, local redaction, observation, strict custom HTTP verdicts, NeMo request/decision fixtures, fail-closed errors, JSON Schema output checks, policy/guardrail fingerprint invalidation, in-flight guardrail snapshots, version rollback, audited quota reconciliation and schema-2 workspace migration.
+## Console acceptance
 
-The browser run created and cloned gateways with minute/day windows and three simultaneous quota rules, configured ordered input/output checks, issued a gateway-bound key, previewed admission without inference, and made real requests through the selected playground gateway. A standard-library HTTP validator was called over Docker networking: a prohibited synthetic phrase was blocked before inference; an accepted email-containing request recorded input redaction and both output verdicts.
+The charcoal/orange console was checked in a separate synthetic workspace: Model lab embedding execution; result/download/request inspection; prompt selection/render/run; batch creation and completed item inspection; quality release/judge views; workload trust form; organization/secret/analytics/directory tabs; SDK links and shared runtime controls. Existing admin totals/team drill-downs, gateway policies and guardrail flows remain covered by the earlier record and regression tests. [Screenshots and tour](CONSOLE.md).
 
-NeMo configuration fields were exercised without an external call. The decision adapter is validated with controlled fixtures matching the published check-API shape; a real NeMo deployment was not available. No actual provider deployment or security-policy effectiveness is implied by these fixtures. Gateway-managed load/latency was not benchmarked; the earlier load measurement below describes the pre-guardrail baseline.
+## Practical limits
 
-## Architecture hardening in 1.2
+- SQLite is one process per volume. PostgreSQL serializes workspace writes with one schema lock; production capacity and database HA require operator testing. Replica fencing relies on synchronized clocks and a 60-second lease timeout.
+- Organizations have separate application accounts/storage/key contexts but share the host/runtime trust domain. Root administrators manage the directory; their accounts do not inherit organization data access. Up to 50 organizations per root.
+- Native Responses/Anthropic/Ollama interfaces are documented **subsets**. Native SSE is buffered and labeled; no server-managed conversations or arbitrary provider tools. Audio is bounded at 32 MB; response-header validation is not acoustic quality validation.
+- Portable logical archives are bounded at 32 MB plaintext; online physical SQLite backup is bounded at 32 MB database size. Larger workspaces require native backups. Each organization is a separate recovery unit. PostgreSQL restore requires the matching master key/schema version.
+- Batches support 500 items and 100 queued jobs. Unstarted work can resume; started inference is never automatically replayed. Saved outputs require explicit deletion. Provider cancellation is best effort.
+- Canary gates check recorded task evidence at publication/advance. They do not autonomously certify production quality. Token/cost estimates are not provider invoices; unknown usage stays visible/reserved. Analytics retention is independent from source retention.
+- Entra/Okta customer tenants, actual Vault/NeMo deployments and intended real models still require environment-specific acceptance. Vendor profile/adapter fixtures do not constitute certification. No third-party protocol attestation, ecosystem adoption or industry-standard status is claimed.
 
-Forty-one regression cases extend the original 51 tests. They cover controlled checked-response envelopes, protocol-safe local text checks, typed/finite request controls and legacy tool permissions, admission-time identity/session/configuration/verified-eligibility checks, bounded discovery/stream reads, malformed completion rejection, isolated schema deadlines and child cleanup, conservative partial-token settlement, atomic event/ledger commits, credential/archive key validation, future-schema rejection, concurrent round-robin, cached-fallback provenance, asynchronous health/restore barriers, named-route no-store and implementation-revision binding invalidation.
-
-The [technical review](TECHNICAL_REVIEW.md) records twelve finding groups, corrections and residual deployment boundaries. The [inference guide](INFERENCE_API.md) documents the deliberately stricter 1.2 compatibility boundary. No new vendor certification or performance claim is made. Existing sample console screenshots describe the same UI workflows; 1.2 acceptance focuses on runtime boundaries and failure cases.
-
-A fresh 1.2 Docker workspace also passed real HTTP checks for version/health, first-administrator setup, anonymous-access rejection, schema-worker pass/block decisions, no-store headers and unsupported-request rejection. The temporary workspace was removed; the existing user workspace was not started or seeded.
-
-## Independent interoperability
-
-A Python standard-library client, importing no gateway code, passed discovery, binding, completion, streaming and unsupported-capability rejection against:
-
-1. The Docker gateway connected to a synthetic OpenAI-compatible upstream.
-2. `examples/reference_server.py`, a second HTTP implementation with no gateway imports, connected directly to that upstream.
-
-The client's discovery now follows `/.well-known/pliqra`. Contract invalidation and identity checks are additionally exercised in automated tests. Third-party adoption or an established protocol standard is not claimed.
-
-## Local load measurement
-
-A controlled run used one Docker gateway, a durable named SQLite volume, eight concurrent callers, exact caching disabled and encrypted request-content capture enabled. A separate synthetic upstream reported fixed usage and returned short completions. For 160 requests:
-
-- All 160 completed with HTTP 200.
-- 1.069 seconds total; approximately 149.6 requests/second.
-- Client-observed median 46.09 ms; p95 89.21 ms.
-
-These are local end-to-end synthetic measurements, including Docker networking and the test server. They do not measure added gateway overhead in isolation, GPU performance, long-context capacity, production SLOs or maximum throughput. Machine resources and workload shape affect the result.
-
-## Supported release boundary
-
-One workspace, one process and one persistent volume. Generic OIDC/SAML/SCIM are implemented and tested with controlled standards fixtures; the intended real identity provider and real LLM endpoint still require their own configuration and acceptance test. Inference is the documented chat-completions subset. PostgreSQL/HA, distributed quotas, provider-native APIs, embeddings/audio, full native Ollama tool adaptation and vendor-specific native safety engines are outside release 1.2. Named gateways and the documented local/NeMo-check/custom-HTTP execution layer are included. The connection protocol remains draft 0.1.
-
-## Pliqra rename verification
-
-The Pliqra package, canonical configuration, API header namespace, SDK and protocol discovery path pass the same inference and identity checks. Four additional upgrade tests cover the old database filename with encrypted credentials, environment fallback precedence, encrypted archive restore and reserved attribution-field isolation. Screenshot assets in `docs/screenshots` were captured from the running Pliqra console using a separate synthetic demo workspace. No private user workspace content is published.
+See [deployment](PLATFORM.md), [interfaces](MODEL_INTERFACES.md), [identity matrix](IDENTITY_COMPATIBILITY.md) and [workflows](WORKFLOWS.md) before production rollout.

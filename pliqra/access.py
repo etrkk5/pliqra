@@ -11,6 +11,9 @@ def current_principal(store, principal):
         key=store.one('SELECT * FROM api_keys WHERE id=?',(principal['id'],))
         if not key or not key['active'] or key['expires'] and key['expires']<=now():
             raise HTTPException(401,'Access key has been revoked or expired')
+        if key.get('workload_provider_id'):
+            if not store.one('SELECT id FROM workload_providers WHERE id=? AND enabled=1',(key['workload_provider_id'],)) or not store.one('SELECT id FROM users WHERE id=? AND active=1',(key.get('created_by'),)):
+                raise HTTPException(401,'Workload identity has been disabled')
         return {**principal,'key':key}
     account=store.one("SELECT u.* FROM users u WHERE u.id=? AND u.active=1 AND "
                       "(u.issuer='local' OR EXISTS(SELECT 1 FROM identity_providers i WHERE i.id=u.issuer AND i.active=1))",(principal['id'],))

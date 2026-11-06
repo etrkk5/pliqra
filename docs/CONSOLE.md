@@ -59,3 +59,13 @@ Pliqra now brings the model-as-a-service catalog, inference routing, identity, q
 ![Pliqra policy preview with rolling quotas and checked response delivery](screenshots/gateway-preview.jpg)
 
 See [the gateway and guardrail guide](GATEWAYS.md) for configuration, APIs, architecture, quota accounting, streaming and the exact NeMo compatibility boundary. External engines remain optional services; Pliqra itself still runs in one container.
+
+## Expanded workflows in 2.0
+
+**Model lab** adds embedding, speech, transcription and compatible native API forms. Results link to the same detailed request evidence as Playground. **Workflows** groups batch progress/output inspection, immutable prompt publication/use, external judges and quality-gated canary controls. **Workspace & identity** groups organization boundaries, workload trust, secret references, analytics exports and vendor claim profiles. **Settings & API** supplies the language clients and executable conformance suite.
+
+![Workflows](screenshots/workflows-quality.png)
+![Model lab](screenshots/model-lab.png)
+![Workload identity](screenshots/workspace-identity.png)
+
+These images use a separate disposable workspace with synthetic providers and example identities; no private workspace was seeded or published. See [workflow details](WORKFLOWS.md) and [identity compatibility](IDENTITY_COMPATIBILITY.md).

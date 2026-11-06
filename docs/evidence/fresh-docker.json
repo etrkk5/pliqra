@@ -1,0 +1,8 @@
+{
+  "version": "2.0.0",
+  "fresh_sqlite_setup": "passed",
+  "anonymous_management_rejection": "passed",
+  "sdk_downloads": "passed",
+  "new_management_surfaces": "passed",
+  "real_model_calls": false
+}

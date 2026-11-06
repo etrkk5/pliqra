@@ -116,7 +116,7 @@ No fallback or automatic replay occurs once streaming has started. Missing termi
 
 Administrators can define multiple named gateways over the existing stable-service catalog. The policy layer adds service selection, project/team restrictions, composable request/token windows, concurrency, inference controls and ordered input/output checks. Assigned keys enforce the same policy on standard, named and protocol inference routes. Existing service/key/project admission remains active.
 
-Gateway admission and budget/key checks share one SQLite transaction. A separate durable ledger reserves tokens across possible attempts and retains up to 30 days independently of reporting retention. Reported usage settles reservations; uncertain usage stays reserved until window expiry or audited reconciliation. Restarted requests release concurrency but preserve uncertain token charges.
+Gateway admission and budget/key checks share one storage transaction (SQLite locally, PostgreSQL with a schema-specific advisory lock across replicas). A separate durable ledger reserves tokens across possible attempts and retains up to 30 days independently of reporting retention. Reported usage settles reservations; uncertain usage stays reserved until window expiry or audited reconciliation. Restarted requests release concurrency but preserve uncertain token charges.
 
 Each accepted request carries a gateway fingerprint and a coherent guardrail configuration snapshot. Gateway or referenced check updates invalidate bound contracts. Input-only checks preserve upstream streaming. Output checks use a complete non-streaming upstream response, then run the output chain before emitting JSON or compatible buffered SSE. Verdict records exclude checked content and remote response text.
 
@@ -159,7 +159,7 @@ A password-encrypted backup contains a consistent SQLite snapshot and its encryp
 | `sdk/pliqra_client.py` | Independent standard-library protocol client |
 | `examples/reference_server.py` | Independent minimal protocol implementation |
 
-The supported topology is one workspace and one server process per volume. Distributed quotas, multiple replicas and physical tenant isolation are outside this release. See [protocol details](PROTOCOL.md), [validation evidence](RELEASE.md) and [future scope](ROADMAP.md).
+The default topology is one SQLite process per volume; optional PostgreSQL supports shared replicas and separate organization schemas. The application boundaries share a runtime trust domain; separate instances are needed for separate infrastructure trust. See [protocol details](PROTOCOL.md), [validation evidence](RELEASE.md) and [future scope](ROADMAP.md).
 
 ## Architecture review and hardened boundaries
 
@@ -170,3 +170,32 @@ Output-checked calls use a controlled response envelope before content checks, p
 JSON Schema work runs in at most two temporary, deadline-bound workers shared by guardrails and evaluations. These workers do not own the volume or API server. Event/ledger settlement is atomic; uncertain token charges cannot undercut known usage. Cache packets retain the producing deployment. Vault validation covers every encrypted source, and restore checks ciphertext/key consistency before mutation.
 
 See the [technical review](TECHNICAL_REVIEW.md) for reproduced findings and the [inference contract](INFERENCE_API.md) for the supported request/response and upgrade boundary.
+
+## 2.0 shared-state topology and publication
+
+```mermaid
+flowchart LR
+    UI[Console and management API] --> Control[Versioned policies, prompts, identities and releases]
+    Apps[Applications / language SDKs] --> Edge[HTTP entry / optional Caddy]
+    Edge --> A[Gateway replica A]
+    Edge --> B[Gateway replica B]
+    A --> Admission[Shared admission transaction]
+    B --> Admission
+    Control --> State[(SQLite default OR PostgreSQL schemas)]
+    Admission --> State
+    Admission --> Checks[Input guardrails]
+    Checks --> Route[Stable / canary / eligible fallback]
+    Route --> Models[Chat / embeddings / audio / native providers]
+    Models --> Output[Checked response + output guardrails]
+    Output --> Ledger[Atomic usage settlement + evidence]
+    Ledger --> State
+    State --> Export[Optional metadata analytics export]
+    Evaluations[Same-case quality comparison + versioned judge] --> Gates[Fresh fingerprint and quality gates]
+    Gates --> Control
+```
+
+Inference keeps one admission/settlement boundary across interfaces. `model_operations.py` and `native.py` adapt to that boundary; text-only checks reject incompatible binary/vector stages. Native streaming adapters buffer and label their delivery. Prompt expansion is literal and versioned. Durable batches call the same boundary per item and retain interrupted status rather than replaying started work.
+
+`postgres.py` owns schema isolation, migration and workspace write locking; `cluster.py` owns heartbeats, distributed leases and fencing. `organizations.py` mounts distinct account/storage/session contexts and derives organization keys. `platform.py` exports metadata idempotently to an optional separate database. `quality.py` binds publication evidence to actual dataset/judge/service versions and records stable/canary selection. `secrets.py` and `workload_identity.py` keep external credentials and machine grants explicit.
+
+[Deployment constraints](PLATFORM.md), [workflow semantics](WORKFLOWS.md), [identity evidence](IDENTITY_COMPATIBILITY.md) and [client conformance](CONFORMANCE.md) define the tested boundaries. The PostgreSQL write lock is a correctness choice, not an unlimited-throughput claim.

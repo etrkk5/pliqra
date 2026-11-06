@@ -1,0 +1,14 @@
+{
+  "provider": "Keycloak",
+  "version": "26.8.2",
+  "environment": "Local disposable realm",
+  "verified_tls_and_custom_ca": "passed",
+  "oidc_discovery": "passed",
+  "pkce_s256": "passed",
+  "nonce_and_id_token": "passed",
+  "signed_id_token_login": "passed",
+  "default_role": "viewer",
+  "callback_replay_rejection": "passed",
+  "customer_tenant_acceptance": "still required",
+  "real_model_inference": false
+}

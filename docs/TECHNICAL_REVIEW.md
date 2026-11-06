@@ -97,3 +97,13 @@ Bu şekil tam yanıt/çıktı kontrollü akışı gösterir. Canlı upstream str
 | Performans/SLO taahhüdü | Yeni worker ve guardrail maliyetini içeren yük/soak ölçümü; eski sentetik benchmark tekrar kullanılmamalı |
 
 Bu eşikler mevcut sürümün yaptığı işler gibi pazarlanmamalı. Kapsam ve uyumluluk sınırları [işletim rehberinde](OPERATIONS.md), [gateway rehberinde](GATEWAYS.md) ve [doğrulama kaydında](RELEASE.md) korunuyor.
+
+## 2.0 architecture follow-through — 6 November 2026
+
+The previous future-scope list is now linked to delivered features and acceptance evidence in [ROADMAP.md](ROADMAP.md). Storage is explicit rather than an opaque SQL compatibility shim: portable schema/data operations are shared; backend-specific JSON/date/introspection paths are explicit. A real PostgreSQL test caught and corrected a remaining SQLite JSON operation in the onboarding dashboard. Admission and configuration writes use one schema lock, while upstream calls remain outside transactions. This trades write parallelism for deterministic policy correctness.
+
+Replica leases fence stale processes; recovery retains uncertain charges and never replays started inference. Management writes participate in restore barriers. Logical restore is transactional, bounded, key-validated and isolated to the selected schema. Organization sessions and keys are separate, with root-directory administration distinct from tenant data permissions.
+
+Native/binary routes share authentication/admission/accounting and apply guardrails only to inspectable content; incompatible required stages fail closed. Provider-native streaming is labeled buffered. External score evidence includes dataset/judge/service versions, and publication rejects stale or failed evidence. The protocol remains draft and its executable core profile makes no vendor-safety or ecosystem claim.
+
+[2.0 validation](RELEASE.md) and [deployment limits](PLATFORM.md) record real local interoperability separately from synthetic provider fixtures and unavailable customer tenants. Database HA infrastructure and production capacity still require operator validation.

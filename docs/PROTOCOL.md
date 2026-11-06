@@ -67,8 +67,16 @@ The conformance command checks discovery, binding and unsupported capability rej
 
 `GET /api/v1/ports/{id}/export` produces `pliqra/service-export/v1`: a service policy plus named deployment references, model names, adapter labels and connection labels. Credentials, endpoint addresses and local project grants are excluded. `POST /api/v1/ports/import` requires mapping every reference to an existing local deployment. Unknown policy fields and unmapped deployments are rejected; destination project access is set explicitly. Native manifests and portable service exports serve different purposes.
 
-The protocol remains draft 0.1 although the gateway product is version 1.2. The independent client has been exercised against both implementations for discovery, bindings, completions, streaming and rejection of unsupported capabilities. This establishes interoperability between these implementations; it does not establish third-party adoption or ecosystem-wide standardization.
+The protocol remains draft 0.1 although the gateway product is version 2.0. The independent client has been exercised against both implementations for discovery, bindings, completions, streaming and rejection of unsupported capabilities. This establishes interoperability between these implementations; it does not establish third-party adoption or ecosystem-wide standardization.
 
 ## Optional managed-gateway policy
 
 Pliqra gateway keys apply their assigned policy to discovery, plain chat and bound invocation. The discovery document advertises an optional gateway_policy path. GET /protocol/v1/gateway returns the effective credential-free policy contract; bindings include optional gateway_id and gateway_fingerprint fields. A policy or referenced guardrail change invalidates the accepted gateway fingerprint and requires a new binding. Independent implementations may omit these extensions. See [gateway policies](GATEWAYS.md) for accounting and guardrail delivery semantics.
+
+See the 2.0 [model interfaces](MODEL_INTERFACES.md), [workflows](WORKFLOWS.md), [scale topology](PLATFORM.md) and [language clients/conformance](CONFORMANCE.md) for the expanded surfaces. The existing typed chat boundary remains in force.
+
+## Extension negotiation
+
+Discovery advertises optional `pliqra.policy/1`, `pliqra.operations/1`, `pliqra.prompts/1` and `pliqra.batches/1` identifiers. Bind requests accept `required_extensions` and `optional_extensions`; unknown required identifiers return 422, unknown optional identifiers are ignored. Successful responses list the accepted identifiers. Negotiation describes interface expectations; it never grants identity permissions or bypasses policies.
+
+Requirements may additionally include `embeddings`, `audio_speech` and `audio_transcription`; these imply the operations extension. The binding response supplies `operation_invocations` for embeddings, speech and transcription. Existing core chat invocations remain unchanged. Optional implementations may support only the core profile and reject all required extensions. Fingerprints include implementation revision **pliqra-inference/3**; upgrading from an older implementation requires explicit rebinding. Canary publication and policy changes do too.

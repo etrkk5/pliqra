@@ -25,3 +25,22 @@ The implemented product surface. For measured evidence and compatibility boundar
 All supported configuration is available through the interface and `/api/v1/*`. `/openapi.json` describes the API; **Settings & API** displays operations offline and offers the Python client and protocol specification for download. The dashboard requires no external fonts, scripts, analytics, or CDN.
 
 For automation, `GET /api/v1/getting-started?service_id=...` exposes the same scoped onboarding state. Administrators can use `POST /api/v1/application-connections` to create a service-restricted key and binding atomically. Failed capability negotiation leaves no orphan key. The generated key permits 60 requests/minute, expires after 90 days, and is returned only once; the binding lifetime is independently configurable.
+
+## 2.0 delivery
+
+| Capability | API entry point | Console |
+|---|---|---|
+| PostgreSQL/shared leases | Environment + `/api/v1/platform/status` | Workspace & identity status |
+| Organizations | `/api/v1/organizations` | Workspace & identity → Organizations |
+| Analytics database | `/api/v1/analytics` | Workspace & identity → Analytics export |
+| Workload federation | `/api/v1/workload-providers`, `/auth/workload/token` | Workspace & identity → Workload identity |
+| Secret sources | `/api/v1/secret-providers` | Workspace & identity → Secret sources |
+| Vendor claim profiles | `/api/v1/identity-profiles` | Workspace & identity → Directory profiles |
+| Immutable prompts | `/api/v1/prompts` | Workflows → Prompt library |
+| Durable batches | `/api/v1/batches` | Workflows → Batches |
+| External quality judges | `/api/v1/judges` | Workflows → Quality & releases; Evaluations |
+| Gated canaries | `/api/v1/releases` | Workflows → Quality & releases |
+| Embeddings/audio/native APIs | [Route matrix](MODEL_INTERFACES.md) | Model lab |
+| Extension negotiation / SDKs | `/protocol/v1/bindings`, `/sdk/*` | Application connection; Settings & API |
+
+Detailed request schemas are available from the running instance's OpenAPI `/openapi.json`. See the [roadmap delivery](ROADMAP.md) for implementation and external acceptance boundaries.

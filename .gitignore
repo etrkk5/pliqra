@@ -3,6 +3,8 @@ __pycache__/
 .pytest_cache/
 *.pyc
 .env
+.env.enterprise
+.env.enterprise.tmp
 data/
 work/
 outputs/

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import hashlib
 from typing import Annotated, Literal
 
 from fastapi import Depends, HTTPException
@@ -36,6 +37,8 @@ class Run(BaseModel):
     services:Annotated[list[str],Field(min_length=1,max_length=10)]
     max_tokens:Annotated[int,Field(ge=16,le=4096)]=256
     store_outputs:bool=False
+    judge_id:str|None=None
+    min_judge_score:Annotated[float,Field(ge=0,le=1)]=.8
 
 
 class Probe(BaseModel):
@@ -84,37 +87,54 @@ def mount(app):
         try:
             for service in body.services:
                 for case in cases:
+                    job=store.one('SELECT node_id,cancel_requested FROM evaluations WHERE id=?',(record_id,))
+                    if job['cancel_requested']:raise asyncio.CancelledError()
+                    if job['node_id']!=app.state.gateway.cluster.node:return
+                    app.state.gateway.cluster.ensure_live()
                     if app.state.gateway.maintenance:raise RuntimeError('Workspace entered maintenance')
                     result={'service':service,'case':case['name'],'passed':False,'checks':[]}
                     try:
+                        fingerprint=app.state.gateway.fingerprint(app.state.gateway.port(service))
                         response=await app.state.gateway.chat({'model':service,'messages':[{'role':'user','content':case['prompt']}],'max_tokens':body.max_tokens,'temperature':0,'stream':False},principal,request_kind='evaluation')
                         data=json.loads(response.body)
                         request_id=response.headers.get('X-Request-ID')
                         event=store.one('SELECT * FROM events WHERE id=?',(request_id,)) or {}
                         text=data['choices'][0]['message'].get('content') or ''
                         checks=await result_checks(case,text,event)
-                        result.update(request_id=request_id,checks=checks,passed=all(check['passed'] for check in checks),latency_ms=event.get('latency_ms'),cost_micros=event.get('cost_micros'),input_tokens=event.get('input_tokens'),output_tokens=event.get('output_tokens'),contract_fingerprint=app.state.gateway.fingerprint(app.state.gateway.port(service)),quality_assertions=bool(case.get('contains') or case.get('json_schema')))
+                        if body.judge_id:
+                            try:
+                                from .quality import judge
+                                judgement=await judge(app,body.judge_id,case['prompt'],text,principal)
+                                result['judge']={k:v for k,v in judgement.items() if k!='reason' or body.store_outputs}
+                                checks.append({'name':'External judge','passed':judgement['score']>=body.min_judge_score})
+                            except Exception:checks.append({'name':'External judge unavailable or invalid','passed':False})
+                        if fingerprint!=app.state.gateway.fingerprint(app.state.gateway.port(service)):
+                            checks.append({'name':'Service contract remained unchanged','passed':False})
+                        result.update(request_id=request_id,checks=checks,passed=all(check['passed'] for check in checks),latency_ms=event.get('latency_ms'),cost_micros=event.get('cost_micros'),input_tokens=event.get('input_tokens'),output_tokens=event.get('output_tokens'),contract_fingerprint=fingerprint,quality_assertions=bool(case.get('contains') or case.get('json_schema') or body.judge_id))
                         if body.store_outputs:result['output']=text[:20000]
                         store.run("UPDATE events SET request_kind='evaluation' WHERE id=?",(request_id,))
                     except HTTPException as exc:result['error']='Request failed with HTTP '+str(exc.status_code)
+                    if app.state.gateway.cluster.fenced:return
                     results.append(result)
                     store.update('evaluations',record_id,{'results':encode(results)})
             store.update('evaluations',record_id,{'status':'completed','finished':now()})
         except asyncio.CancelledError:
-            store.update('evaluations',record_id,{'status':'cancelled','finished':now(),'results':encode(results)})
+            if not app.state.gateway.cluster.fenced:store.update('evaluations',record_id,{'status':'cancelled','finished':now(),'results':encode(results)})
             raise
         except Exception:
-            store.update('evaluations',record_id,{'status':'error','finished':now(),'error':'Evaluation stopped unexpectedly; inspect request records','results':encode(results)})
+            if not app.state.gateway.cluster.fenced:store.update('evaluations',record_id,{'status':'error','finished':now(),'error':'Evaluation stopped unexpectedly; inspect request records','results':encode(results)})
 
     @app.post('/api/v1/evaluations',tags=['Evaluations'],status_code=202)
     async def run_evaluation(body:Run,p=Depends(admin)):
         dataset=store.one('SELECT * FROM evaluation_sets WHERE id=?',(body.dataset_id,))
         if not dataset:raise HTTPException(404,'Dataset not found')
-        if store.one("SELECT id FROM evaluations WHERE status IN ('queued','running') LIMIT 1"):raise HTTPException(409,'One evaluation may run at a time')
         for service in body.services:app.state.gateway.port(service)
+        if body.judge_id and not store.one('SELECT id FROM quality_judges WHERE id=?',(body.judge_id,)):raise HTTPException(422,'Judge not found')
         record_id=uid('eval_')
         cases=json.loads(dataset['cases'])
-        store.insert('evaluations',{'id':record_id,'name':body.name,'dataset_id':body.dataset_id,'services':encode(body.services),'status':'queued','created':now(),'actor':p['id'],'max_tokens':body.max_tokens,'store_outputs':int(body.store_outputs)})
+        with store.transaction():
+            if store.one("SELECT id FROM evaluations WHERE status IN ('queued','running') LIMIT 1"):raise HTTPException(409,'One evaluation may run at a time')
+            store.insert('evaluations',{'id':record_id,'name':body.name,'dataset_id':body.dataset_id,'services':encode(body.services),'status':'queued','created':now(),'actor':p['id'],'max_tokens':body.max_tokens,'store_outputs':int(body.store_outputs),'node_id':app.state.gateway.cluster.node,'dataset_hash':hashlib.sha256(dataset['cases'].encode()).hexdigest(),'judge_id':body.judge_id,'min_judge_score':body.min_judge_score})
         # Schedule on the application's loop even though management functions execute in a worker thread.
         def launch():
             task=asyncio.create_task(evaluate(record_id,body,p,cases))
@@ -153,9 +173,11 @@ def mount(app):
 
     @app.post('/api/v1/evaluations/{record_id}/cancel',tags=['Evaluations'])
     async def cancel_evaluation(record_id:str,p=Depends(admin)):
+        row=store.one("SELECT id FROM evaluations WHERE id=? AND status IN ('queued','running')",(record_id,))
+        if not row:raise HTTPException(409,'Evaluation is not running')
+        store.update('evaluations',record_id,{'cancel_requested':1})
         task=app.state.evaluation_tasks.get(record_id)
         if task and not task.done():task.cancel()
-        else:raise HTTPException(409,'Evaluation is not running')
         store.audit(p['id'],'evaluation.cancelled',record_id)
         return {'ok':True}
 

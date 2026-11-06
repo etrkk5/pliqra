@@ -18,6 +18,12 @@ from .inference_schema import map_message_text, requests_tools, INFERENCE_CONTRA
 from .schema_validation import SchemaExecutor, validate_schema_definition
 
 
+def reservation_units(body):
+    # Internal unit hints are produced only by typed non-chat adapters, never accepted on chat APIs.
+    return (max(len(encode(body).encode('utf-8')),body.get('_input_units',0))+1024,
+            max(body.get('max_completion_tokens',body.get('max_tokens',1024)),body.get('_output_units',0)))
+
+
 class Strict(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
@@ -195,7 +201,7 @@ class PolicyEngine:
         values = {'principal': principal['id'], 'user_id': key.get('created_by') if key else principal['id'], 'key_id': key['id'] if key else None,
                   'project_id': project_id, 'team_id': team_id, 'port_id': port['id']}
         # Admission is conservative, not a tokenizer: reserve input UTF-8 bytes and requested output for every possible attempt.
-        reserve = (len(encode(body).encode('utf-8'))+1024+body.get('max_completion_tokens', body.get('max_tokens', 1024)))*attempts
+        reserve = sum(reservation_units(body))*attempts
         for rule in config['limits']:
             used = self.usage(profile, rule, values, instant)
             amount = 1 if rule['metric'] == 'requests' else reserve
@@ -284,7 +290,8 @@ class PolicyEngine:
                 return value
             return 'redacted', map_message_text(messages, redact)
         endpoint = endpoint_url(config['endpoint'])
-        secret = self.vault.decrypt(rail['secret'])
+        from .secrets import SecretResolver
+        secret = await SecretResolver(self.store,self.vault,client).resolve(self.vault.decrypt(rail['secret']))
         headers = {config['auth_header']: ((config['auth_prefix']+' ') if config['auth_prefix'] else '')+secret} if secret else {}
         if rail['provider'] == 'nemo':
             # NeMo's check API makes the decision without generating a second completion.

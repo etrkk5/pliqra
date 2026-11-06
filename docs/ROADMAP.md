@@ -1,17 +1,19 @@
-# Product scope after 1.2
+# Roadmap delivery — 2.0
 
-The single-container product includes project/team access, OIDC/SAML/SCIM, operational recovery, per-attempt accounting, capability probes, evaluations, portable service import/export, an independent client and an independent reference implementation. These are implemented, not placeholder roadmap items. Version 1.1 adds named gateways, composable rolling quotas, policy-bound keys and ordered local/NeMo-check/custom-HTTP guardrails with UI/API controls.
+The five engineering tracks previously listed as future scope are implemented in 2.0. Default installation remains endpoint-first, platform-independent and one container. The earlier roadmap was a scope boundary, not a tracked delivery plan; 2.0 ties each track to implementation, UI/API controls, tests and operating guides.
 
-The core direction remains endpoint-first, platform-independent, offline-capable, with UI/API parity and a small independently implementable protocol. Declared capabilities, verified behavior, reported usage, estimates and unknowns remain distinct.
+| Track | Delivered | Evidence / guide |
+|---|---|---|
+| Identity and secrets | Workload JWT federation, secret references, signed SAML logout, SCIM enterprise fields and vendor claim profiles | [Compatibility matrix](IDENTITY_COMPATIBILITY.md), real Keycloak 26.8.2 HTTPS login, signed/replay fixtures |
+| Storage and scale | PostgreSQL, replica fencing, shared quotas/concurrency, separate organizations, analytics exports | [Deployment](PLATFORM.md), real two-replica and database tests |
+| Quality and protocol | External judges, fresh-evidence publication gates, controlled canaries, extension negotiation | [Workflows](WORKFLOWS.md), failed/stale evidence and shared allocation tests |
+| Model workloads | Embeddings, audio, stateless native APIs, Ollama tools, immutable prompts, durable batches | [Interfaces](MODEL_INTERFACES.md), boundary/guardrail/accounting/recovery tests |
+| Clients and interoperability | Python, JavaScript/TypeScript, Go; executable core conformance profile; independent reference server | [Conformance](CONFORMANCE.md), real HTTP against both implementations |
 
-Future additions require their own authorization, API/UI controls, observable execution and conformance evidence:
+See the [delivery checklist](DELIVERY_PLAN.md) and [release validation](RELEASE.md) for acceptance details.
 
-- Real-vendor identity compatibility matrix, vendor provisioning extensions, workload identity, optional secret-manager integration and SAML single logout.
-- PostgreSQL, optional analytics storage, multiple replicas, distributed admission limits and separate organizations.
-- Model quality regression gates, controlled canary publication, evaluations with external judges and protocol extension negotiation.
-- Embeddings, audio, provider-native APIs, complete Ollama tool-loop adaptation, prompt versioning and batch workloads.
-- Additional language SDKs, formal third-party protocol conformance and ecosystem adoption.
+## External acceptance remains external
 
-None of these future capabilities or an industry-standard status is implied by release 1.2.
+Entra/Okta customer tenants, actual Vault and NeMo deployments, intended real models and provider billing need environment-specific acceptance. Native APIs expose documented subsets and buffered native streaming. Third-party protocol attestation, ecosystem adoption and an industry-standard status cannot be delivered by implementing gateway code. The executable suite is available for those participants; none of their approval or adoption is claimed.
 
-Version 1.2 hardens the existing scope: typed inference boundaries, atomic admission/settlement, guarded response envelopes, bounded provider IO and isolated schema validation. See [the technical review](TECHNICAL_REVIEW.md) for findings and regression evidence.
+Database failover infrastructure, model training/deployment, universal vendor API parity and autonomous production-quality rollout are outside the delivered product boundary. These are explicit limits, not completed checkboxes. See the corresponding guides before choosing a topology.

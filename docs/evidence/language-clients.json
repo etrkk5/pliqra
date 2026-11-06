@@ -1,0 +1,14 @@
+{
+  "environment": "Local disposable synthetic gateway, real HTTP",
+  "javascript_runtime": "Node 22 (official Docker image)",
+  "go_runtime": "Go 1.25 (official Docker image)",
+  "checks": [
+    "service discovery",
+    "capability binding",
+    "non-streaming completion",
+    "stream with terminal marker"
+  ],
+  "javascript": "passed",
+  "go": "passed",
+  "real_model_inference": false
+}

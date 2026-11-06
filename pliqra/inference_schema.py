@@ -5,7 +5,7 @@ from typing import Annotated, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
-INFERENCE_CONTRACT_REVISION = 'pliqra-inference/2'
+INFERENCE_CONTRACT_REVISION = 'pliqra-inference/3'
 
 
 class Message(BaseModel):
@@ -34,10 +34,18 @@ class StreamOptions(BaseModel):
     include_usage: bool = True
 
 
+class PromptSelection(BaseModel):
+    model_config=ConfigDict(extra='forbid')
+    id:str
+    version:Annotated[int,Field(ge=1)]
+    variables:dict[str,Annotated[str,Field(max_length=20000)]]={}
+
+
 class ChatInput(BaseModel):
     model_config = ConfigDict(extra='forbid', allow_inf_nan=False)
     model: Annotated[str, Field(min_length=1, max_length=256)]
-    messages: Annotated[list[Message], Field(min_length=1, max_length=500)]
+    messages: Annotated[list[Message], Field(max_length=500)] = []
+    prompt:PromptSelection|None=None
     stream: bool = False
     stream_options: StreamOptions | None = None
     max_tokens: Annotated[int | None, Field(ge=1, le=131072)] = None
@@ -75,6 +83,7 @@ class ChatInput(BaseModel):
 
     @model_validator(mode='after')
     def unambiguous_output_limit(self):
+        if not self.messages and self.prompt is None:raise ValueError('Messages or an explicit prompt version are required')
         if self.max_tokens is not None and self.max_completion_tokens is not None:
             raise ValueError('Use either max_tokens or max_completion_tokens, not both')
         return self
@@ -120,6 +129,19 @@ def valid_completion(data):
                 not all(isinstance(function.get(k), str) for k in ('name', 'arguments'))):
             raise ValueError('Invalid completion function')
     return data
+
+
+def validate_tool_choice(data,body):
+    choice=body.get('tool_choice',body.get('function_call'))
+    if choice in (None,'auto'):return
+    message=data['choices'][0]['message']
+    names=[call['function']['name'] for call in message.get('tool_calls') or []]
+    if message.get('function_call'):names.append(message['function_call']['name'])
+    if choice=='none' and names:raise ValueError('Provider ignored the no-tools constraint')
+    if choice=='required' and not names:raise ValueError('Provider did not return a required tool call')
+    if isinstance(choice,dict):
+        selected=choice.get('name') or choice.get('function',{}).get('name')
+        if not names or any(name!=selected for name in names):raise ValueError('Provider did not return the selected function')
 
 
 def map_message_text(messages, transform):

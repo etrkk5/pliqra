@@ -1,0 +1,48 @@
+{
+  "profile": "pliqra-core/1",
+  "target": "local-reference-core",
+  "service": "reference-chat",
+  "tested_at": 1793952847,
+  "inference_performed": true,
+  "passed": true,
+  "results": [
+    {
+      "id": "CORE-01-discovery-metadata",
+      "passed": true
+    },
+    {
+      "id": "CORE-02-service-contract",
+      "passed": true
+    },
+    {
+      "id": "CORE-03-explicit-binding",
+      "passed": true
+    },
+    {
+      "id": "CORE-04-unknown-capability",
+      "passed": true
+    },
+    {
+      "id": "CORE-05-required-extension",
+      "passed": true
+    },
+    {
+      "id": "CORE-06-optional-extension",
+      "passed": true
+    },
+    {
+      "id": "CORE-07-authentication",
+      "passed": true
+    },
+    {
+      "id": "CORE-08-completion",
+      "passed": true
+    },
+    {
+      "id": "CORE-09-stream-terminal",
+      "passed": true
+    }
+  ],
+  "scope": "Core interoperability only. Does not certify model quality, safety, real-vendor compatibility, deployment resilience or third-party adoption.",
+  "environment": "Local disposable workspace with synthetic upstream; no real LLM"
+}

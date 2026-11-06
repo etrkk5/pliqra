@@ -21,13 +21,13 @@ Follow the three cards on **Overview**. Progress comes from retained successful 
 Prefer a single Docker command sequence?
 
 ```sh
-docker build -t pliqra:1.2.0 .
+docker build -t pliqra:2.0.0 .
 docker run -d --name pliqra \
   -p 127.0.0.1:8088:8080 \
   -v pliqra-data:/data \
   --add-host host.docker.internal:host-gateway \
   --restart unless-stopped \
-  pliqra:1.2.0
+  pliqra:2.0.0
 ```
 
 Open http://localhost:8088, create your administrator, then **Connect model**. Supply a running OpenAI-compatible or Ollama endpoint. Models become stable named AI services automatically. A manual model name handles servers without model-list discovery. No accounts, credentials, or sample traffic are seeded.
@@ -79,3 +79,5 @@ Tests use isolated temporary databases and synthetic upstreams. They exercise in
 See [release validation](RELEASE.md) for measured evidence and [future scope](ROADMAP.md) for additions beyond this release.
 
 For supported request fields, checked response delivery and the stricter 1.2 compatibility boundary, see [the inference API guide](INFERENCE_API.md).
+
+See the 2.0 [model interfaces](MODEL_INTERFACES.md), [workflows](WORKFLOWS.md), [scale topology](PLATFORM.md) and [language clients/conformance](CONFORMANCE.md) for the expanded surfaces. The existing typed chat boundary remains in force.

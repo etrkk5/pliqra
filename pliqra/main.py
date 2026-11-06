@@ -1,4 +1,4 @@
-from .config import env
+from .config import env,http_verify
 import asyncio
 import csv
 import io
@@ -7,6 +7,7 @@ import os
 import re
 import secrets
 import sqlite3
+import psycopg
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -18,15 +19,16 @@ import httpx
 from authlib.integrations.starlette_client import OAuth
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, StringConstraints, ValidationError, field_validator
 from starlette.middleware.sessions import SessionMiddleware
+from starlette._utils import get_route_path
 from itsdangerous import TimestampSigner
 
 from . import __version__
 from .access import service_allowed, project_ids, require_project, sync_group_memberships
-from .connectors import discover
+from .connectors import discover, response_json
 from .db import Store, encode, now, uid
 from .gateway import CAPABILITIES, Gateway, decoded_deployment, decoded_port
 from .security import Vault, digest, endpoint_url, hash_password, verify_password
@@ -66,7 +68,7 @@ class ConnectionInput(BaseModel):
     name: Name
     endpoint: Annotated[str, Field(min_length=8, max_length=2000)]
     api_key: Annotated[str, Field(max_length=4096)] = ""
-    provider: Literal["auto", "openai", "ollama"] = "auto"
+    provider: Literal["auto", "openai", "ollama", "responses", "anthropic"] = "auto"
     model: Annotated[str, Field(max_length=256)] = ""
     auth_header: Annotated[str, Field(pattern=r"^[A-Za-z][A-Za-z0-9-]{0,63}$")] = "Authorization"
     auth_prefix: Annotated[str, Field(max_length=32, pattern=r"^[A-Za-z0-9 -]*$")] = "Bearer"
@@ -146,6 +148,8 @@ class BindingInput(BaseModel):
     service: str
     gateway_id: str | None = None
     requirements: list[str] = []
+    required_extensions:Annotated[list[str],Field(max_length=20)]=[]
+    optional_extensions:Annotated[list[str],Field(max_length=20)]=[]
     ttl_seconds: Annotated[int, Field(ge=60, le=86400)] = 3600
 
     @field_validator("requirements")
@@ -160,49 +164,66 @@ def safe_user(row):
     return {key: row[key] for key in ("id", "email", "name", "role", "issuer", "active", "created")}
 
 
-def create_app(data_dir=None):
+def create_app(data_dir=None, *, database_url=None, database_schema=None, encryption_key=None, organization=None, public_url_override=None):
     directory = Path(data_dir or env("PLIQRA_DATA_DIR", "data"))
-    store, login_attempts = Store(directory), {}
+    store, login_attempts = Store(directory,database_url,database_schema), {}
     try:
-        vault = Vault(directory)
+        vault = Vault(directory,store,encryption_key)
     except BaseException:
         store.close()
         raise
     oauth = OAuth()
     secure_cookies = env("PLIQRA_SECURE_COOKIES", "0") == "1"
-    public_url = env("PLIQRA_PUBLIC_URL", "").rstrip("/")
+    public_url = (public_url_override if public_url_override is not None else env("PLIQRA_PUBLIC_URL", "")).rstrip("/")
+    base_path='/org/'+organization['slug'] if organization else ''
+    cookie_name='plq_session_'+organization['id'] if organization else 'plq_session'
 
     @asynccontextmanager
     async def lifespan(app):
-        async with httpx.AsyncClient(timeout=httpx.Timeout(90, connect=5), follow_redirects=False, limits=httpx.Limits(max_connections=200, max_keepalive_connections=40), trust_env=False) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(90, connect=5), follow_redirects=False, limits=httpx.Limits(max_connections=200, max_keepalive_connections=40), trust_env=False,verify=http_verify(),transport=getattr(app.state,'upstream_transport',None)) as client:
             app.state.loop = asyncio.get_running_loop()
             app.state.client = client
             app.state.gateway = Gateway(store, vault, client)
             from .operations import maintain
             worker = asyncio.create_task(maintain(app))
+            heartbeat = asyncio.create_task(app.state.gateway.cluster.heartbeat())
             app.state.jobs = set()
+            from .batches import worker as batch_worker
+            batch_worker_task=asyncio.create_task(batch_worker(app))
+            from .platform import analytics_worker
+            analytics_task=asyncio.create_task(analytics_worker(app))
             try:
                 yield
             finally:
+                if hasattr(app.state,'organizations'):await app.state.organizations.close()
                 worker.cancel()
+                heartbeat.cancel()
+                batch_worker_task.cancel()
+                analytics_task.cancel()
                 for job in list(app.state.jobs):
                     job.cancel()
-                await asyncio.gather(worker, *list(app.state.jobs), return_exceptions=True)
+                await asyncio.gather(worker, heartbeat, batch_worker_task, analytics_task, *list(app.state.jobs), return_exceptions=True)
+                app.state.gateway.cluster.close()
         store.close()
 
     app = FastAPI(title="Pliqra", version=__version__, description="Endpoint-first model connectivity. Management API, OpenAI-compatible chat and the draft Pliqra discovery/binding protocol.", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.store, app.state.vault, app.state.oauth = store, vault, oauth
-    app.add_middleware(WorkspaceSessionMiddleware, key_provider=lambda:vault.session_secret()+store.setting('auth_epoch',''), session_cookie="plq_oidc", same_site="lax", https_only=secure_cookies, max_age=600)
+    app.add_middleware(WorkspaceSessionMiddleware, key_provider=lambda:vault.session_secret()+store.setting('auth_epoch',''), session_cookie='plq_oidc_'+organization['id'] if organization else 'plq_oidc', path=base_path or '/', same_site="lax", https_only=secure_cookies, max_age=600)
 
     @app.middleware("http")
     async def boundaries(request, call_next):
-        saml_acs = request.url.path.startswith("/auth/saml/") and request.url.path.endswith("/acs")
+        path=get_route_path(request.scope)
+        saml_acs = path.startswith("/auth/saml/") and path.endswith("/acs")
         if request.method in ("POST", "PATCH", "PUT", "DELETE"):
             origin = request.headers.get("origin")
             expected = public_url or str(request.base_url).rstrip("/")
+            origin_parts=urlsplit(expected)
+            expected=origin_parts.scheme+'://'+origin_parts.netloc
             if origin and origin != expected and not saml_acs:
                 return JSONResponse({"detail": "Cross-origin writes are not permitted"}, 403)
             allowed_types = {"application/json", "application/scim+json"}
+            audio_upload=path.endswith('/audio/transcriptions')
+            if audio_upload:allowed_types.add('multipart/form-data')
             if saml_acs:
                 allowed_types.add("application/x-www-form-urlencoded")
             if request.method != "DELETE" and request.headers.get("content-type", "").split(";")[0] not in allowed_types:
@@ -211,7 +232,7 @@ def create_app(data_dir=None):
                 content_length = int(request.headers.get("content-length", "0"))
             except ValueError:
                 return JSONResponse({"detail": "Invalid content length"}, 400)
-            body_limit = 96_000_000 if request.url.path == "/api/v1/backups/restore" else 4_000_000
+            body_limit = 96_000_000 if path == "/api/v1/backups/restore" else 44_100_000 if audio_upload or path.endswith('/operations/transcription') else 4_000_000
             if content_length > body_limit:
                 return JSONResponse({"detail": "Request exceeds 4 MB"}, 413)
             # Enforce the limit for chunked requests as well as Content-Length.
@@ -222,12 +243,21 @@ def create_app(data_dir=None):
                     return JSONResponse({"detail": "Request exceeds 4 MB"}, 413)
                 chunks.append(chunk)
             request._body = b"".join(chunks)
-        response = await call_next(request)
+        control=(request.method in ('POST','PATCH','PUT','DELETE') and path.startswith(('/api/','/scim/'))) or path.startswith('/auth/') or path=='/protocol/v1/bindings'
+        try:
+            if control and path not in ('/api/v1/backups/restore','/api/chat','/api/generate'):
+                with app.state.gateway.cluster.checking('management'):
+                    response=await call_next(request)
+            else:response = await call_next(request)
+        except HTTPException as exc:return JSONResponse({'detail':exc.detail},exc.status_code,headers=exc.headers)
+        except psycopg.OperationalError:
+            app.state.gateway.cluster.fence()
+            return JSONResponse({'detail':'Storage connection failed; restart this replica after database recovery. Inspect requests before retrying inference.'},503,headers={'Retry-After':'5'})
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "same-origin"
         response.headers["X-Frame-Options"] = "DENY"
-        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
-        if request.url.path.startswith(("/api/", "/auth/", "/protocol/", "/v1/", "/g/")):
+        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+        if path.startswith(("/api/", "/auth/", "/protocol/", "/v1/", "/g/")):
             response.headers["Cache-Control"] = "no-store"
         return response
 
@@ -248,14 +278,20 @@ def create_app(data_dir=None):
     async def integrity_error(request, exc):
         return JSONResponse({"detail": "This configuration conflicts with an existing record. Refresh and try again."}, 409)
 
+    @app.exception_handler(psycopg.OperationalError)
+    async def database_unavailable(request,exc):
+        return JSONResponse({'detail':'Database is temporarily unavailable. Inspect request records before retrying a model call.'},503,headers={'Retry-After':'5'})
+
     def principal(request: Request):
         authorization = request.headers.get("authorization", "")
+        if not authorization and request.url.path.endswith('/v1/messages') and request.headers.get('x-api-key'):
+            authorization='Bearer '+request.headers['x-api-key']
         if authorization.startswith("Bearer "):
             key = store.one("SELECT * FROM api_keys WHERE token_hash=? AND active=1", (digest(authorization[7:]),))
             if not key or (key["expires"] and key["expires"] <= now()):
                 raise HTTPException(401, "Invalid or expired access key")
             return {"id": key["id"], "kind": "key", "role": "consumer", "key": key}
-        token = request.cookies.get("plq_session", "")
+        token = request.cookies.get(cookie_name, "")
         row = store.one("SELECT s.csrf,s.expires,u.* FROM sessions s JOIN users u ON s.user_id=u.id WHERE s.token_hash=? AND u.active=1 AND (u.issuer='local' OR EXISTS(SELECT 1 FROM identity_providers i WHERE i.id=u.issuer AND i.active=1))", (digest(token),)) if token else None
         if not row or row["expires"] <= now():
             raise HTTPException(401, "Sign in to continue")
@@ -273,13 +309,13 @@ def create_app(data_dir=None):
             raise HTTPException(403, "Administrator access is required")
         return p
 
-    def session_response(account, request=None):
+    def session_response(account, request=None, federation_context=None):
         token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
         with store.transaction():
             store.run("DELETE FROM sessions WHERE expires<?", (now(),))
-            store.insert("sessions", {"token_hash": digest(token), "user_id": account["id"], "csrf": csrf, "expires": now() + 43200})
-        response = RedirectResponse("/", 303) if request else JSONResponse({"user": safe_user(account), "csrf": csrf})
-        response.set_cookie("plq_session", token, httponly=True, secure=secure_cookies, samesite="lax", max_age=43200, path="/")
+            store.insert("sessions", {"token_hash": digest(token), "user_id": account["id"], "csrf": csrf, "expires": now() + 43200,'federation_context':encode(federation_context or {})})
+        response = RedirectResponse(base_path+'/', 303) if request else JSONResponse({"user": safe_user(account), "csrf": csrf})
+        response.set_cookie(cookie_name, token, httponly=True, secure=secure_cookies, samesite="lax", max_age=43200, path=base_path or '/')
         return response
 
     def throttle(request):
@@ -294,6 +330,7 @@ def create_app(data_dir=None):
     @app.get("/healthz", tags=["System"])
     def health():
         store.one("SELECT 1")
+        if hasattr(app.state,'gateway'):app.state.gateway.cluster.ensure_live()
         return {"status": "ok", "version": __version__}
 
     @app.get("/api/v1/session", tags=["Authentication"])
@@ -304,7 +341,9 @@ def create_app(data_dir=None):
             p = principal(request)
             if p["kind"] != "user":
                 raise HTTPException(401)
-            return {"setup_required": setup, "user": safe_user(p["user"]), "csrf": p["csrf"], "identity_providers": providers, "version": __version__}
+            federation=store.one('SELECT protocol,config FROM identity_providers WHERE id=?',(p['user']['issuer'],))
+            logout=f"/api/v1/identity-providers/{p['user']['issuer']}/logout" if federation and federation['protocol']=='saml' and json.loads(federation['config']).get('slo_url') else None
+            return {"setup_required": setup, "user": safe_user(p["user"]), "csrf": p["csrf"], "identity_providers": providers, "version": __version__,'federated_logout':logout,'workspace_name':(organization or {}).get('name','Your workspace'),'deployment_label':'PostgreSQL · shared state' if store.backend=='postgresql' else 'Single container · SQLite'}
         except HTTPException:
             return {"setup_required": setup, "user": None, "identity_providers": providers, "version": __version__}
 
@@ -330,9 +369,9 @@ def create_app(data_dir=None):
 
     @app.post("/api/v1/logout", tags=["Authentication"])
     def logout(request: Request, p=Depends(user)):
-        store.run("DELETE FROM sessions WHERE token_hash=?", (digest(request.cookies.get("plq_session", "")),))
+        store.run("DELETE FROM sessions WHERE token_hash=?", (digest(request.cookies.get(cookie_name, "")),))
         response = JSONResponse({"ok": True})
-        response.delete_cookie("plq_session")
+        response.delete_cookie(cookie_name,path=base_path or '/')
         return response
 
     @app.get("/api/v1/connections", tags=["Connections"])
@@ -354,10 +393,14 @@ def create_app(data_dir=None):
     @app.post("/api/v1/connections/discover", tags=["Connections"])
     async def probe(body: ConnectionInput, p=Depends(admin)):
         from .connectors import headers as auth_headers
+        if body.provider=='anthropic' and 'auth_header' not in body.model_fields_set:
+            body.auth_header='x-api-key';body.auth_prefix=''
         auth_headers("validation",body.auth_header,body.auth_prefix)
         if body.model.strip():
-            return {"endpoint": endpoint_url(body.endpoint), "provider": "ollama" if body.provider == "ollama" else "openai", "models": [{"model": body.model.strip(), "capabilities": ["chat", "streaming"], "evidence": "Manually configured; inference not yet tested"}]}
-        return await discover(app.state.client, body.endpoint, body.api_key, body.provider, body.auth_header, body.auth_prefix)
+            return {"endpoint": endpoint_url(body.endpoint), "provider": body.provider if body.provider!='auto' else 'openai', "models": [{"model": body.model.strip(), "capabilities": ["chat", "streaming"], "evidence": "Manually configured; inference not yet tested"}]}
+        app.state.gateway.secrets.client=app.state.client
+        secret=await app.state.gateway.secrets.resolve(body.api_key)
+        return await discover(app.state.client, body.endpoint, secret, body.provider, body.auth_header, body.auth_prefix)
 
     @app.post("/api/v1/connections", tags=["Connections"], status_code=201)
     async def create_connection(body: ConnectionInput, p=Depends(admin)):
@@ -528,9 +571,9 @@ def create_app(data_dir=None):
     async def create_identity(body: IdentityInput, p=Depends(admin)):
         issuer = endpoint_url(body.issuer)
         try:
-            result = await app.state.client.get(issuer + "/.well-known/openid-configuration", timeout=8)
-            result.raise_for_status()
-            metadata = result.json()
+            async with app.state.client.stream('GET',issuer + "/.well-known/openid-configuration",timeout=8) as result:
+                result.raise_for_status()
+                metadata=await response_json(result,100000)
             if metadata.get("issuer", "").rstrip("/") != issuer or not all(metadata.get(key) for key in ("authorization_endpoint", "token_endpoint", "jwks_uri")):
                 raise ValueError("Invalid OIDC discovery document")
         except (httpx.HTTPError, ValueError):
@@ -550,26 +593,32 @@ def create_app(data_dir=None):
         store.audit(p["id"], "identity.disabled", record_id)
         return {"ok": True}
 
-    def oidc_client(provider_id):
+    oidc_secret_versions={}
+    async def oidc_client(provider_id):
         row = store.one("SELECT * FROM identity_providers WHERE id=? AND active=1 AND protocol='oidc'", (provider_id,))
         if not row:
             raise HTTPException(404, "Identity provider is not available")
         name = "oidc_" + provider_id
+        app.state.gateway.secrets.client=app.state.client
+        secret=await app.state.gateway.secrets.resolve(vault.decrypt(row['secret']))
         client = oauth.create_client(name)
+        if client is not None and oidc_secret_versions.get(name)!=digest(secret):
+            oauth._clients.pop(name,None);oauth._registry.pop(name,None);client=None
         if client is None:
-            oauth.register(name, client_id=row["client_id"], client_secret=vault.decrypt(row["secret"]), server_metadata_url=row["issuer"].rstrip("/") + "/.well-known/openid-configuration", client_kwargs={"scope": "openid email profile", "code_challenge_method": "S256"})
+            oauth.register(name, client_id=row["client_id"], client_secret=secret, server_metadata_url=row["issuer"].rstrip("/") + "/.well-known/openid-configuration", client_kwargs={"scope": "openid email profile", "code_challenge_method": "S256",'verify':http_verify(),'trust_env':False})
+            oidc_secret_versions[name]=digest(secret)
             client = oauth.create_client(name)
         return row, client
 
     @app.get("/auth/oidc/{provider_id}/login", tags=["Identity"])
     async def oidc_login(provider_id: str, request: Request):
-        _, client = oidc_client(provider_id)
+        _, client = await oidc_client(provider_id)
         callback = (public_url or str(request.base_url).rstrip("/")) + f"/auth/oidc/{provider_id}/callback"
         return await client.authorize_redirect(request, callback)
 
     @app.get("/auth/oidc/{provider_id}/callback", tags=["Identity"])
     async def oidc_callback(provider_id: str, request: Request):
-        row, client = oidc_client(provider_id)
+        row, client = await oidc_client(provider_id)
         try:
             token = await client.authorize_access_token(request, claims_options={"iss": {"essential": True, "value": row["issuer"]}})
             info = token.get("userinfo")
@@ -577,7 +626,7 @@ def create_app(data_dir=None):
                 raise ValueError("No validated identity")
         except Exception:
             store.audit("anonymous", "identity.login_failed", provider_id)
-            return RedirectResponse("/?auth_error=oidc", 303)
+            return RedirectResponse(base_path+"/?auth_error=oidc", 303)
         from .identity import federated_account
         account = federated_account(store,row,info)
         return session_response(account, request)
@@ -622,11 +671,12 @@ def create_app(data_dir=None):
 
     @app.get("/api/v1/settings", tags=["System"])
     def settings(p=Depends(user)):
-        return {"version": __version__, "storage": "SQLite / WAL", "deployment": "Single-container / single-replica", "protocol": "pliqra/0.1-draft", "content_logging": False, "secure_cookies": secure_cookies, "public_url": public_url or None, "identity_support": ["Local accounts", "OIDC with PKCE", "SAML 2.0", "SCIM 2.0 provisioning"], "planned_identity": [], "workspace_model": "Project memberships with scoped request visibility", "interfaces": ["OpenAI-compatible chat completions", "Ollama chat adapter"], "encryption": "Fernet authenticated encryption; volume-managed key or PLIQRA_ENCRYPTION_KEY"}
+        return {"version": __version__, "storage": "PostgreSQL" if store.backend=="postgresql" else "SQLite / WAL", "deployment": "Shared database / multiple replicas" if store.backend=="postgresql" else "Single container / local storage", "protocol": "pliqra/0.1-draft", "content_logging": False, "secure_cookies": secure_cookies, "public_url": public_url or None, "identity_support": ["Local accounts", "OIDC with PKCE", "SAML 2.0", "SCIM 2.0 provisioning"], "planned_identity": [], "workspace_model": "Project memberships with scoped request visibility", "interfaces": ["Chat completions", "Embeddings", "Speech and transcription", "Responses", "Anthropic Messages", "Ollama native chat/generate"], "encryption": "Fernet authenticated encryption; volume-managed key or PLIQRA_ENCRYPTION_KEY"}
 
     @app.get("/.well-known/pliqra", tags=["Protocol"])
     def protocol():
-        return {"protocol": "pliqra/0.1-draft", "status": "experimental", "discovery": "/protocol/v1/services", "bind": "/protocol/v1/bindings", "authentication": "Bearer access key", "gateway_policy": "/protocol/v1/gateway", "features": ["capability-discovery", "contract-fingerprint", "explicit-binding", "decision-records"], "invocation_interfaces": ["openai-chat-completions"]}
+        from .protocol_extensions import EXTENSIONS
+        return {"protocol": "pliqra/0.1-draft", "status": "experimental", "discovery": "/protocol/v1/services", "bind": "/protocol/v1/bindings", "authentication": "Bearer access key", "gateway_policy": "/protocol/v1/gateway", "features": ["capability-discovery", "contract-fingerprint", "explicit-binding", "decision-records",'extension-negotiation'], "invocation_interfaces": ["openai-chat-completions",'embeddings','audio-speech','audio-transcription'], 'extensions':EXTENSIONS,'conformance_profile':'pliqra-core/1'}
 
     @app.get("/protocol/v1/services", tags=["Protocol"])
     def services(p=Depends(principal)):
@@ -642,6 +692,9 @@ def create_app(data_dir=None):
 
     @app.post("/protocol/v1/bindings", tags=["Protocol"], status_code=201)
     def bind(body: BindingInput, p=Depends(principal)):
+        from .protocol_extensions import negotiate
+        extensions=negotiate(body.required_extensions,body.optional_extensions)
+        if set(body.requirements)&{'embeddings','audio_speech','audio_transcription'} and 'pliqra.operations/1' not in extensions:extensions.append('pliqra.operations/1')
         port = app.state.gateway.port(body.service)
         app.state.gateway.authorize_port(p, port)
         policy=app.state.gateway.policies.resolve(p,port,body.gateway_id)
@@ -654,9 +707,10 @@ def create_app(data_dir=None):
             eligible,decisions=app.state.gateway.candidates({**port,'verified_only':True},body.requirements)
             if not eligible:raise HTTPException(422,'No deployment has the gateway-required verified capabilities')
         binding = {"id": uid("bind_"), "principal": p["id"], "port_id": port["id"], "version": port["version"], "fingerprint": app.state.gateway.fingerprint(port), "requirements": encode(body.requirements), "expires": now() + body.ttl_seconds, "created": now(),"gateway_id":policy['id'] if policy else None,"gateway_fingerprint":policy['fingerprint'] if policy else None}
+        binding['extensions']=encode(extensions)
         store.insert("bindings", binding)
         store.audit(p["id"], "binding.created", binding["id"], {"service": port["name"], "version": port["version"]})
-        return {**binding, "requirements": body.requirements, "invoke": f"/protocol/v1/bindings/{binding['id']}/invoke", "service": port["name"]}
+        return {**binding, "requirements": body.requirements, 'extensions':extensions,"invoke": f"/protocol/v1/bindings/{binding['id']}/invoke", "service": port["name"],'operation_invocations':{name:f"/protocol/v1/bindings/{binding['id']}/operations/{name}" for name in ('embeddings','speech','transcription')} if 'pliqra.operations/1' in extensions else {}}
 
     @app.post("/protocol/v1/bindings/{record_id}/invoke", tags=["Protocol"])
     async def invoke(record_id: str, body: ChatInput, p=Depends(principal)):
@@ -681,7 +735,7 @@ def create_app(data_dir=None):
     async def chat(body: ChatInput, p=Depends(principal)):
         return await app.state.gateway.chat(body.model_dump(exclude_none=True), p)
 
-    app.state.context = {"store":store,"vault":vault,"principal":principal,"user":user,"admin":admin,"session_response":session_response,"public_url":public_url,"secure_cookies":secure_cookies,"oauth":oauth,"PortInput":PortInput,"port_fields":port_fields,"create_key":create_key,"KeyInput":KeyInput,"bind":bind,"BindingInput":BindingInput,"ChatInput":ChatInput}
+    app.state.context = {"store":store,"vault":vault,"principal":principal,"user":user,"admin":admin,"session_response":session_response,"public_url":public_url,"secure_cookies":secure_cookies,"oauth":oauth,"PortInput":PortInput,"port_fields":port_fields,"create_key":create_key,"KeyInput":KeyInput,"bind":bind,"BindingInput":BindingInput,"ChatInput":ChatInput,'base_path':base_path,'cookie_name':cookie_name,'organization':organization}
     from .operations import mount as mount_operations
     from .identity import mount as mount_identity
     from .reporting import mount as mount_reporting
@@ -694,10 +748,41 @@ def create_app(data_dir=None):
     mount_experience(app)
     from .fabric import mount as mount_fabric
     mount_fabric(app)
+    from .model_operations import mount as mount_model_operations
+    mount_model_operations(app)
+    from .secrets import mount as mount_secrets
+    from .workload_identity import mount as mount_workload_identity
+    mount_secrets(app)
+    mount_workload_identity(app)
+    from .prompts import mount as mount_prompts
+    mount_prompts(app)
+    from .batches import mount as mount_batches
+    mount_batches(app)
+    from .quality import mount as mount_quality
+    mount_quality(app)
+    from .native import mount as mount_native
+    mount_native(app)
+    from .platform import mount as mount_platform
+    mount_platform(app)
+    from .identity_profiles import mount as mount_identity_profiles
+    mount_identity_profiles(app)
+    if organization is None:
+        from .organizations import mount as mount_organizations
+        mount_organizations(app)
 
     @app.get('/sdk/pliqra_client.py',tags=['Protocol'])
     def download_client():
         return FileResponse(STATIC.parent.parent/'sdk'/'pliqra_client.py',filename='pliqra_client.py',media_type='text/x-python')
+
+    @app.get('/sdk/{language}/{filename}',tags=['Protocol'])
+    def download_sdk(language:str,filename:str):
+        allowed={'javascript':{'pliqra.mjs','pliqra.d.mts'},'go':{'pliqra.go','go.mod'}}
+        if filename not in allowed.get(language,set()):raise HTTPException(404,'SDK file not found')
+        return FileResponse(STATIC.parent.parent/'sdk'/language/filename,filename=filename,media_type='text/plain')
+
+    @app.get('/sdk/conformance.py',tags=['Protocol'])
+    def download_conformance():
+        return FileResponse(STATIC.parent.parent/'sdk'/'conformance.py',filename='conformance.py',media_type='text/x-python')
 
     @app.get('/protocol/specification',tags=['Protocol'])
     def protocol_specification():
@@ -707,6 +792,8 @@ def create_app(data_dir=None):
 
     @app.get("/", include_in_schema=False)
     def index():
-        return FileResponse(STATIC / "index.html")
+        html=(STATIC/'index.html').read_text()
+        html=html.replace('href="/static/',f'href="{base_path}/static/').replace('src="/static/',f'src="{base_path}/static/')
+        return HTMLResponse(html.replace('<meta charset="UTF-8">','<meta charset="UTF-8"><meta name="pliqra-base" content="'+base_path+'">'))
 
     return app

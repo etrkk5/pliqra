@@ -323,7 +323,7 @@ def test_scim_discovery_documents(workspace):
     root='/scim/v2/'+provider
     for resource in ['Schemas','ResourceTypes']:
         response=client.get(root+'/'+resource,headers=headers)
-        assert response.status_code==200 and response.json()['totalResults']==2
+        assert response.status_code==200 and response.json()['totalResults']==(3 if resource=='Schemas' else 2)
         item=response.json()['Resources'][0]
         assert client.get(root+'/'+resource+'/'+item['id'],headers=headers).json()['id']==item['id']
     assert client.get(root+'/Schemas').status_code==401

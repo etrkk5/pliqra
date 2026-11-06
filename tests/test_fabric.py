@@ -316,7 +316,8 @@ def test_version_two_workspace_migrates_without_losing_resources(workspace, tmp_
             previous.execute('ALTER TABLE '+table+' DROP COLUMN '+column)
     previous.execute('PRAGMA user_version=2'); previous.commit(); previous.close()
     upgraded = Store(directory)
-    assert upgraded.one('PRAGMA user_version')['user_version'] == 3
+    from pliqra.db import SCHEMA_VERSION
+    assert upgraded.one('PRAGMA user_version')['user_version'] == SCHEMA_VERSION
     assert upgraded.one('SELECT COUNT(*) AS n FROM connections')['n'] == 1
     assert upgraded.one('SELECT COUNT(*) AS n FROM gateway_profiles')['n'] == 0
     assert 'gateway_id' in {r['name'] for r in upgraded.all('PRAGMA table_info(api_keys)')}

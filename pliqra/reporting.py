@@ -41,7 +41,7 @@ def mount(app):
         return where,args,{'start':beginning,'end':ending}
 
     def aggregate(where,args,group=None):
-        totals="COUNT(*) AS requests,COALESCE(SUM(e.status='success'),0) AS successful,COALESCE(SUM(e.status IN ('error','incomplete','interrupted')),0) AS errors,COALESCE(SUM(e.status='pending'),0) AS pending,COALESCE(SUM(e.status='cancelled'),0) AS cancelled,COALESCE(SUM(e.status='rejected'),0) AS rejected,COALESCE(SUM(e.status='blocked'),0) AS blocked,COALESCE(SUM(e.input_tokens),0) AS input_tokens,COALESCE(SUM(e.output_tokens),0) AS output_tokens,COALESCE(SUM(COALESCE(e.cost_micros,e.known_cost_micros)),0) AS cost_micros,COALESCE(SUM(e.cost_micros IS NULL),0) AS unpriced,COALESCE(SUM(e.usage_source IN ('unknown','partial')),0) AS unknown_usage,COALESCE(SUM(e.cache_hit),0) AS cache_hits,AVG(e.latency_ms) AS latency_ms"
+        totals="COUNT(*) AS requests,COALESCE(SUM(CASE WHEN e.status='success' THEN 1 ELSE 0 END),0) AS successful,COALESCE(SUM(CASE WHEN e.status IN ('error','incomplete','interrupted') THEN 1 ELSE 0 END),0) AS errors,COALESCE(SUM(CASE WHEN e.status='pending' THEN 1 ELSE 0 END),0) AS pending,COALESCE(SUM(CASE WHEN e.status='cancelled' THEN 1 ELSE 0 END),0) AS cancelled,COALESCE(SUM(CASE WHEN e.status='rejected' THEN 1 ELSE 0 END),0) AS rejected,COALESCE(SUM(CASE WHEN e.status='blocked' THEN 1 ELSE 0 END),0) AS blocked,COALESCE(SUM(e.input_tokens),0) AS input_tokens,COALESCE(SUM(e.output_tokens),0) AS output_tokens,COALESCE(SUM(COALESCE(e.cost_micros,e.known_cost_micros)),0) AS cost_micros,COALESCE(SUM(CASE WHEN e.cost_micros IS NULL THEN 1 ELSE 0 END),0) AS unpriced,COALESCE(SUM(CASE WHEN e.usage_source IN ('unknown','partial') THEN 1 ELSE 0 END),0) AS unknown_usage,COALESCE(SUM(e.cache_hit),0) AS cache_hits,AVG(e.latency_ms) AS latency_ms"
         if not group:return store.one('SELECT '+totals+' FROM events e WHERE '+where,args)
         columns={'models':'e.model,e.connection_name','projects':'e.project_id','teams':'e.team_id','users':'e.actor_user_id','keys':'e.key_id','services':'e.port_id,e.port_name'}[group]
         return store.all('SELECT '+columns+','+totals+' FROM events e WHERE '+where+' GROUP BY '+columns+' ORDER BY requests DESC',args)
@@ -92,7 +92,9 @@ def mount(app):
             row=store.one('SELECT e.latency_ms FROM events e WHERE '+where+' AND e.latency_ms IS NOT NULL ORDER BY e.latency_ms LIMIT 1 OFFSET ?',[*args,int((measured-1)*q)]) if measured else None
             summary[f'p{int(q*100)}_ms']=row['latency_ms'] if row else None
         granularity='%Y-%m-%dT%H:00:00Z' if interval['end']-interval['start']<=8*86400 else '%Y-%m-%dT00:00:00Z'
-        series=store.all("SELECT strftime(?,e.started,'unixepoch') AS bucket,COUNT(*) AS requests,SUM(e.status='success') AS successful,SUM(e.status IN ('error','incomplete','interrupted')) AS errors,COALESCE(SUM(e.input_tokens+e.output_tokens),0) AS tokens FROM events e WHERE "+where+' GROUP BY bucket ORDER BY bucket',[granularity,*args])
+        bucket="to_char(to_timestamp(e.started) AT TIME ZONE 'UTC',?)" if store.backend=="postgresql" else "strftime(?,e.started,'unixepoch')"
+        if store.backend=="postgresql":granularity='YYYY-MM-DD"T"HH24:00:00"Z"' if '%H' in granularity else 'YYYY-MM-DD"T"00:00:00"Z"'
+        series=store.all("SELECT "+bucket+" AS bucket,COUNT(*) AS requests,SUM(CASE WHEN e.status='success' THEN 1 ELSE 0 END) AS successful,SUM(CASE WHEN e.status IN ('error','incomplete','interrupted') THEN 1 ELSE 0 END) AS errors,COALESCE(SUM(e.input_tokens+e.output_tokens),0) AS tokens FROM events e WHERE "+where+' GROUP BY bucket ORDER BY bucket',[granularity,*args])
         project_rows={r['project_id']:r for r in aggregate(where,args,'projects')}
         allowed=set(project_ids(store,p))
         projects=[{**r,**project_rows.get(r['id'],{'requests':0,'cost_micros':0,'unpriced':0})} for r in store.all('SELECT * FROM projects') if r['id'] in allowed]

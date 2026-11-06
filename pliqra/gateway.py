@@ -13,14 +13,16 @@ from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
-from .connectors import ollama_result, sse, upstream_request, bounded_lines, response_json, strict_json
-from .inference_schema import checked_completion, requests_tools, valid_completion, INFERENCE_CONTRACT_REVISION
+from .connectors import ollama_result, ollama_calls, sse, upstream_request, bounded_lines, response_json, strict_json
+from .inference_schema import checked_completion, requests_tools, valid_completion, validate_tool_choice, INFERENCE_CONTRACT_REVISION
 from .db import encode, now, uid
 from .access import service_allowed, require_project, current_principal
-from .policies import PolicyEngine
+from .policies import PolicyEngine, reservation_units
+from .cluster import Cluster
+from .secrets import SecretResolver
 
 
-CAPABILITIES = {"chat", "streaming", "tools", "structured_output", "vision"}
+CAPABILITIES = {"chat", "streaming", "tools", "structured_output", "vision", "embeddings", "audio_speech", "audio_transcription"}
 
 
 @dataclass(frozen=True)
@@ -60,10 +62,22 @@ class Gateway:
         self.store, self.vault, self.client = store, vault, client
         self.active=0
         self.checks=0
-        self.maintenance=False
         self.state_lock=threading.RLock()
-        self.generation=0
+        self.cluster=Cluster(store)
         self.policies=PolicyEngine(store,vault)
+        self.secrets=SecretResolver(store,vault,client)
+
+    @property
+    def maintenance(self):return self.store.setting('maintenance',False)
+
+    @maintenance.setter
+    def maintenance(self,value):self.store.set_setting('maintenance',bool(value))
+
+    @property
+    def generation(self):return self.store.setting('workspace_generation',0)
+
+    @generation.setter
+    def generation(self,value):self.store.set_setting('workspace_generation',value)
 
     @contextmanager
     def checking(self):
@@ -71,11 +85,14 @@ class Gateway:
             if self.maintenance:raise HTTPException(503,'Workspace maintenance is in progress')
             if self.active+self.checks>=self.store.setting('runtime',{}).get('max_concurrency',64):
                 raise HTTPException(429,'Gateway concurrency limit reached')
+            lease=self.cluster.acquire('provider_check')
             self.checks+=1
         try:
             yield
         finally:
-            with self.state_lock:self.checks-=1
+            with self.state_lock:
+                self.checks-=1
+                self.cluster.release(lease)
 
     def port(self, name):
         value = self.store.one("SELECT * FROM ports WHERE name=? OR id=?", (name, name))
@@ -83,7 +100,7 @@ class Gateway:
             raise HTTPException(404, "AI service not found")
         return decoded_port(value)
 
-    def candidates(self, port, required=None):
+    def candidates(self, port, required=None, _rollout=True):
         requirements = set(port["requirements"]) | set(required or [])
         candidates, decisions = [], []
         for deployment_id in port["deployments"]:
@@ -105,9 +122,20 @@ class Gateway:
             count = self.store.setting('round_robin:'+port['id'],0)
             offset = count % len(candidates)
             candidates = candidates[offset:] + candidates[:offset]
+        if _rollout:
+            from .quality import active_release
+            release=active_release(self.store,port['id'])
+            if release:
+                candidate=self.port(release['candidate_id'])
+                config=release['config']
+                if self.base_fingerprint(self.port(port['id']))!=config['stable_fingerprint'] or self.base_fingerprint(candidate)!=config['candidate_fingerprint']:
+                    return [],decisions+[{'eligible':False,'reason':'Release evidence is stale; roll back and evaluate the changed services'}]
+                other,trail=self.candidates({**candidate,'verified_only':candidate.get('verified_only') or port.get('verified_only')},required,_rollout=False)
+                candidates=[{**d,'rollout_lane':'stable','release_id':release['id']} for d in candidates]+[{**d,'rollout_lane':'canary','release_id':release['id']} for d in other]
+                decisions+=trail
         return candidates, decisions
 
-    def fingerprint(self, port):
+    def base_fingerprint(self, port):
         deployments = []
         for record_id in port["deployments"]:
             row = self.store.one("SELECT d.id,d.model,d.capabilities,d.enabled,d.input_price,d.output_price,d.metadata_hash,c.endpoint,c.provider,c.enabled AS connection_enabled,c.auth_header,c.auth_prefix FROM deployments d JOIN connections c ON c.id=d.connection_id WHERE d.id=?", (record_id,))
@@ -115,6 +143,12 @@ class Gateway:
         content = {"name": port["name"], "version": port["version"], "enabled": port["enabled"], "requirements": port["requirements"], "strategy": port["strategy"], "log_content":port.get("log_content",0),"project_id":port.get("project_id"),"verified_only":port.get("verified_only",0),"cache_ttl":port.get("cache_ttl",0),"max_input_chars":port.get("max_input_chars",200000),"max_output_tokens":port.get("max_output_tokens",32768),"deployments": deployments}
         content['contract_revision']=INFERENCE_CONTRACT_REVISION
         return hashlib.sha256(json.dumps(content,sort_keys=True,separators=(",",":")).encode()).hexdigest()
+
+    def fingerprint(self,port):
+        from .quality import release_fingerprint
+        base=self.base_fingerprint(port)
+        release=release_fingerprint(self,port)
+        return hashlib.sha256(encode({'base':base,'release':release}).encode()).hexdigest() if release else base
 
     def manifest(self, port):
         candidates, decisions = self.candidates(port)
@@ -128,7 +162,10 @@ class Gateway:
     def begin(self, principal, port, deployment, body, decisions, reservation_prices=None, kind='inference', attempt_limit=1, policy=None, delivery=None, admission=None,candidates=None):
         event_id, started = uid('req_'), now()
         with self.store.transaction():
+            self.cluster.ensure_live()
+            if not self.store.setting('organization_enabled',True):raise HTTPException(403,'Organization access is disabled')
             principal=current_principal(self.store,principal)
+            if body.get('_prompt_project_id'):require_project(self.store,principal,body['_prompt_project_id'])
             if admission:
                 latest=self.port(port['id']) if kind!='probe' else port
                 if admission.generation!=self.generation or admission.service_fingerprint!=self.fingerprint(latest):
@@ -144,6 +181,14 @@ class Gateway:
                     if candidates is not None and port['strategy']=='round_robin':
                         order={d['id']:i for i,d in enumerate(eligible)}
                         candidates.sort(key=lambda d:order[d['id']])
+                        deployment=candidates[0]
+                    if candidates is not None and any(d.get('release_id') for d in candidates):
+                        from .quality import active_release
+                        release=active_release(self.store,port['id'])
+                        cursor=self.store.setting('release_cursor:'+release['id'],0)
+                        lane='canary' if (cursor*37+17)%100<release['percent'] else 'stable'
+                        order={d['id']:i for i,d in enumerate(eligible)}
+                        candidates.sort(key=lambda d:(d.get('rollout_lane')!=lane,order[d['id']]))
                         deployment=candidates[0]
                 current_policy=self.policies.resolve(principal,latest,policy['id'] if policy else None)
                 if (current_policy['id'] if current_policy else None)!=(policy['id'] if policy else None):
@@ -171,12 +216,17 @@ class Gateway:
                 if project['monthly_budget'] is not None:
                     pricing=reservation_prices or deployment
                     if pricing['input_price'] is None or pricing['output_price'] is None:raise HTTPException(422,'This project has a budget. Configure input and output pricing before using this model.')
-                    reserve=cost_micros((len(encode(body).encode())+1024,body.get('max_completion_tokens',body.get('max_tokens',1024))),pricing)*attempt_limit
+                    reserve=cost_micros(reservation_units(body),pricing)*attempt_limit
                     month=datetime.now(timezone.utc).replace(day=1,hour=0,minute=0,second=0,microsecond=0).timestamp()
                     spent=self.store.one("SELECT COALESCE(SUM(CASE WHEN status='pending' THEN reserved_micros ELSE COALESCE(cost_micros,known_cost_micros+reserved_micros) END),0) AS n FROM events WHERE project_id=? AND started>=?",(project_id,month))['n']
                     if spent+reserve>project['monthly_budget']*1_000_000:raise HTTPException(402,"Project budget cannot cover this request's estimated reservation")
             self.policies.admit(policy,event_id,principal,port,body,project_id,team_id,attempt_limit)
             self.store.insert('events',{'id':event_id,'started':started,'principal':principal['id'],'actor_user_id':key.get('created_by') if key else principal['id'],'project_id':project_id,'team_id':team_id,'key_id':key['id'] if key else None,'port_id':port['id'],'port_name':port['name'],'port_version':port['version'],'deployment_id':deployment['id'],'model':deployment['model'],'connection_name':deployment['connection_name'],'status':'pending','stream':int(bool(body.get('stream'))),'reserved_micros':reserve,'decisions':encode(decisions),'request_kind':kind,'price_snapshot':encode({'input_price':deployment['input_price'],'output_price':deployment['output_price']}),'gateway_id':policy['id'] if policy else None,'gateway_name':policy['name'] if policy else None,'gateway_fingerprint':policy['fingerprint'] if policy else None,'delivery':delivery})
+            self.store.update('events',event_id,{'node_id':self.cluster.node})
+            if body.get('prompt'):self.store.update('events',event_id,{'prompt_id':body['prompt']['id'],'prompt_version':body['prompt']['version']})
+            if deployment.get('release_id'):
+                self.store.set_setting('release_cursor:'+deployment['release_id'],self.store.setting('release_cursor:'+deployment['release_id'],0)+1)
+                self.store.update('events',event_id,{'decisions':encode(decisions+[{'release_id':deployment['release_id'],'lane':deployment['rollout_lane'],'reason':'Selected by the admitted canary traffic allocation'}])})
             if candidates is not None and port['strategy']=='round_robin':
                 cursor='round_robin:'+port['id']
                 self.store.set_setting(cursor,self.store.setting(cursor,0)+1)
@@ -220,6 +270,7 @@ class Gateway:
             fields.update(input_tokens=0,output_tokens=0,usage_source='not_invoked',cost_micros=0,reserved_micros=0,
                           deployment_id=None,model=None,connection_name=None)
         with self.store.transaction():
+            self.cluster.ensure_live()
             self.store.update('events',event_id,fields)
             self.policies.settle(event_id,status,attempts)
 
@@ -230,7 +281,10 @@ class Gateway:
         self.store.insert('events',{'id':uid('req_'),'started':now(),'finished':now(),'principal':principal['id'],'actor_user_id':key.get('created_by') if key else principal['id'],'key_id':key['id'] if key else None,'project_id':key['project_id'] if key else None,'team_id':key.get('team_id') if key else None,'port_name':str(body.get('model',''))[:256],'status':'rejected','stream':int(bool(body.get('stream'))),'cost_micros':0,'usage_source':'not_invoked','error':encode(error.detail) if isinstance(error.detail,dict) else str(error.detail),'decisions':encode([{'eligible':False,'reason':'Rejected before upstream inference','http_status':error.status_code}]),'gateway_id':policy['id'] if policy else None,'gateway_name':policy['name'] if policy else None})
 
     async def chat(self,body,principal,binding=None,request_kind='inference',gateway_id=None):
-        try:return await self.route(body,principal,binding,request_kind,gateway_id)
+        try:
+            from .prompts import expand
+            body=expand(self.store,principal,body)
+            return await self.route(body,principal,binding,request_kind,gateway_id)
         except HTTPException as exc:
             recorded=isinstance(exc.detail,dict) and exc.detail.get('request_id')
             if not recorded and exc.status_code in (402,403,409,422,429,503):self.rejected(body,principal,exc,gateway_id)
@@ -241,7 +295,7 @@ class Gateway:
             body,port,candidates,decisions,policy,admission=self.prepare(body,principal,binding,request_kind,gateway_id)
         return await self.execute(body,principal,port,candidates,decisions,request_kind,policy,admission=admission)
 
-    def prepare(self,body,principal,binding=None,request_kind='inference',gateway_id=None):
+    def prepare(self,body,principal,binding=None,request_kind='inference',gateway_id=None,required_capabilities=None):
         if binding and (binding['principal']!=principal['id'] or binding['expires']<=now()):
             raise HTTPException(403,'Binding belongs to another identity or has expired')
         port=self.port(binding['port_id'] if binding else body['model'])
@@ -262,7 +316,7 @@ class Gateway:
         self.policies.preflight(policy,body,principal)
         if policy and policy['config']['require_verified']:
             port={**port,'verified_only':True}
-        required={'chat'}
+        required=set(required_capabilities or ['chat'])
         if body.get('stream') and not self.policies.buffered(policy):required.add('streaming')
         if requests_tools(body):required.add('tools')
         if body.get('response_format',{}).get('type') in ('json_object','json_schema'):required.add('structured_output')
@@ -281,22 +335,27 @@ class Gateway:
         with self.state_lock:
             if self.maintenance:raise HTTPException(503,'Workspace maintenance is in progress')
             if self.active+self.checks>=self.store.setting('runtime',{}).get('max_concurrency',64):raise HTTPException(429,'Gateway concurrency limit reached')
+            lease=self.cluster.acquire('inference')
             self.active+=1
         released=False
         def release():
             nonlocal released
             with self.state_lock:
-                if not released:self.active-=1;released=True
+                if not released:
+                    self.active-=1
+                    self.cluster.release(lease)
+                    released=True
         chosen=candidates[0]
         response=None
         event_id=None
         started=time.perf_counter()
         streaming=False
         cache_id=None
-        buffered=bool(body.get('stream') and self.policies.buffered(policy))
-        delivery='guarded_buffer' if buffered else 'live_stream' if body.get('stream') else 'json'
+        forced=body.get('tool_choice',body.get('function_call')) not in (None,'auto')
+        buffered=bool(body.get('stream') and (self.policies.buffered(policy) or forced or any(d['provider'] in ('responses','anthropic') for d in candidates)))
+        delivery=('guarded_buffer' if self.policies.buffered(policy) else 'adapter_buffer') if buffered else 'live_stream' if body.get('stream') else 'json'
         try:
-            if not policy and port.get('cache_ttl',0)>0 and not body.get('stream') and not requests_tools(body) and kind=='inference':
+            if not policy and not any(d.get('release_id') for d in candidates) and port.get('cache_ttl',0)>0 and not body.get('stream') and not requests_tools(body) and kind=='inference':
                 cache_id=hashlib.sha256((principal['id']+self.fingerprint(port)+json.dumps(body,sort_keys=True)).encode()).hexdigest()
                 cached=self.store.one('SELECT payload FROM cache_entries WHERE id=? AND expires>?',(cache_id,now()))
                 if cached:
@@ -322,9 +381,13 @@ class Gateway:
                 chosen=deployment
                 attempt_id=uid('attempt_')
                 self.store.insert('attempts',{'id':attempt_id,'event_id':event_id,'deployment_id':deployment['id'],'model':deployment['model'],'started':now(),'outcome':'pending'})
-                url,payload,auth=upstream_request(deployment,upstream_body,deployment['model'],self.vault.decrypt(deployment['secret']))
+                self.secrets.client=self.client
+                secret=await self.secrets.resolve(self.vault.decrypt(deployment['secret']))
+                url,payload,auth=upstream_request(deployment,upstream_body,deployment['model'],secret)
                 payload.pop('pliqra',None)
                 payload.pop('modelport',None)
+                payload.pop('prompt',None)
+                payload.pop('_prompt_project_id',None)
                 try:
                     response=await self.client.send(self.client.build_request('POST',url,json=payload,headers=auth),stream=True)
                 except httpx.HTTPError:
@@ -350,6 +413,7 @@ class Gateway:
                     break
                 break
             trail=decisions+attempts+[{'deployment_id':chosen['id'],'model':chosen['model'],'selected':response is not None,'reason':'Selected the first available eligible deployment' if port['strategy']=='priority' else 'Selected by round-robin among eligible deployments'}]
+            if chosen.get('release_id'):trail.append({'release_id':chosen['release_id'],'lane':chosen['rollout_lane'],'reason':'Actual release lane after pre-stream fallback'})
             self.store.update('events',event_id,{'deployment_id':chosen['id'],'model':chosen['model'],'connection_name':chosen['connection_name'],'decisions':encode(trail),'price_snapshot':encode({'attempts':[{k:row.get(k) for k in ('id','model','input_price','output_price')} for row in candidates]})})
             if response is None:
                 self.finish(event_id,started,chosen,'error',error='All eligible upstreams failed or rejected this request')
@@ -365,7 +429,11 @@ class Gateway:
             data=await response_json(response)
             await response.aclose()
             if chosen['provider']=='ollama':data=ollama_result(data,event_id,chosen['model'])
+            elif chosen['provider'] in ('responses','anthropic'):
+                from .native import provider_result
+                data=provider_result(chosen['provider'],data,event_id,chosen['model'])
             valid_completion(data)
+            validate_tool_choice(data,body)
             self.finish_attempt(attempt_id,chosen,'success',data,200)
             if self.policies.buffered(policy):data=checked_completion(data,event_id,chosen['model'])
             if policy:data=await self.policies.check(policy,'output',body,self.client,event_id,response=data)
@@ -376,6 +444,7 @@ class Gateway:
                 packet={'format':'pliqra/cache/1','deployment_id':chosen['id'],'response':data}
                 self.store.run('INSERT INTO cache_entries VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,expires=excluded.expires',(cache_id,port['id'],self.vault.encrypt(encode(packet)),now()+port['cache_ttl']))
             headers={'X-Request-ID':event_id,'X-Pliqra-Model':chosen['model'],'X-Pliqra-Cache':'MISS','X-Pliqra-Delivery':delivery}
+            if chosen.get('release_id'):headers['X-Pliqra-Lane']=chosen['rollout_lane']
             if policy:headers['X-Pliqra-Gateway']=policy['id']
             if buffered:
                 async def guarded_chunks():
@@ -417,6 +486,8 @@ class Gateway:
         usage, terminal, ttft, error = {}, False, None, None
         captured=[];capture_size=0
         capture=bool(self.store.one("SELECT id FROM event_content WHERE id=?",(event_id,)))
+        tool_index=0
+        tool_seen=False
         try:
             async for line in bounded_lines(response):
                 if capture and capture_size<64000:
@@ -430,9 +501,14 @@ class Gateway:
                         raise ValueError("Upstream reported a streaming error")
                     message = obj.get("message", {})
                     text = message.get("content", "")
+                    calls=ollama_calls(message.get('tool_calls'),tool_index)
+                    for call in calls:
+                        call['index']=tool_index
+                        tool_index+=1
+                    tool_seen=tool_seen or bool(calls)
                     if ttft is None and (text or message.get("tool_calls")):
                         ttft = (time.perf_counter() - started) * 1000
-                    chunk = {"id": event_id, "object": "chat.completion.chunk", "model": deployment["model"], "choices": [{"index": 0, "delta": {"content": text, **({"tool_calls": message["tool_calls"]} if message.get("tool_calls") else {})}, "finish_reason": "stop" if obj.get("done") else None}]}
+                    chunk = {"id": event_id, "object": "chat.completion.chunk", "model": deployment["model"], "choices": [{"index": 0, "delta": {"content": text, **({"tool_calls":calls} if calls else {}), **({'reasoning_content':message['thinking']} if message.get('thinking') else {})}, "finish_reason": ('tool_calls' if tool_seen else 'stop') if obj.get("done") else None}]}
                     if obj.get("done"):
                         normalized = ollama_result(obj, event_id, deployment["model"])
                         usage = normalized

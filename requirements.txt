@@ -7,3 +7,4 @@ itsdangerous==2.2.0
 python3-saml==1.16.0
 python-multipart==0.0.33
 jsonschema==4.26.0
+psycopg[binary]==3.3.8
