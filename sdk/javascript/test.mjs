@@ -15,7 +15,7 @@ async function transport(url,options){
   if(url.endsWith('/protocol/v1/bindings'))return json({id:'binding',service:body.service,fingerprint:'fingerprint',expires:9999999999,invoke:'/protocol/v1/bindings/binding/invoke',extensions:mode==='ignore-extensions'?[]:body.required_extensions});
   if(mode==='changed')return json({detail:'Contract changed'},409);
   if(body.stream){
-    const bytes=new TextEncoder().encode('data: '+JSON.stringify({choices:[{delta:{content:'Merhaba dünya 🌍'}}]})+'\n\n'+(mode==='truncated'?'':'data: [DONE]\n\n'));
+    const bytes=new TextEncoder().encode('data: '+JSON.stringify({choices:[{delta:{content:'Hello, world 🌍'}}]})+'\n\n'+(mode==='truncated'?'':'data: [DONE]\n\n'));
     let offset=0;
     return new Response(new ReadableStream({pull(controller){if(offset>=bytes.length){controller.close();return;}controller.enqueue(bytes.slice(offset,++offset));}}),{headers:{'content-type':'text/event-stream'}});
   }
@@ -26,7 +26,7 @@ assert.equal((await client.services())[0].name,'synthetic');
 const bound=await client.connect('synthetic',{requiredExtensions:['pliqra.operations/1']});
 assert.equal((await bound.complete([{role:'user',content:'Synthetic'}])).choices[0].message.content,'Synthetic completion');
 let text='';for await(const chunk of bound.stream([{role:'user',content:'Synthetic'}]))text+=chunk.choices[0].delta.content;
-assert.equal(text,'Merhaba dünya 🌍');
+assert.equal(text,'Hello, world 🌍');
 assert.ok(requests.every(request=>request.url.startsWith('https://gateway.test/org/research/')));
 mode='changed';await assert.rejects(()=>bound.complete([]),ContractChanged);
 mode='truncated';await assert.rejects(async()=>{for await(const _ of bound.stream([])){}},error=>error instanceof PliqraError&&error.status===502);

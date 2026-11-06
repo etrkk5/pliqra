@@ -39,7 +39,7 @@ def workspace(tmp_path):
             if body["model"] == "unavailable":
                 return httpx.Response(503)
             if body.get("stream"):
-                chunk = {"id": "upstream", "choices": [{"index": 0, "delta": {"content": "Hello, dünya!"}, "finish_reason": None}]}
+                chunk = {"id": "upstream", "choices": [{"index": 0, "delta": {"content": "Hello, world 🌍!"}, "finish_reason": None}]}
                 output = "data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n"
                 if body["messages"][-1]["content"] != "truncate":
                     output += 'data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":7}}\n\ndata: [DONE]\n\n'
@@ -120,7 +120,7 @@ def test_stream_fragmentation_usage_and_incomplete_stream(workspace):
     service = connected["services"][0]["name"]
     response = call(client, service, stream=True)
     assert response.status_code == 200
-    assert "Hello, dünya!" in response.text
+    assert "Hello, world 🌍!" in response.text
     assert "[DONE]" in response.text
     event = client.get("/api/v1/events/" + response.headers["x-request-id"]).json()
     assert event["status"] == "success"

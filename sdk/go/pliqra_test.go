@@ -34,7 +34,7 @@ func TestProtocolAndFragmentedUnicode(t *testing.T) {
 			json.NewDecoder(r.Body).Decode(&body)
 			if body["stream"] == true {
 				w.Header().Set("Content-Type", "text/event-stream")
-				for _, part := range []string{"data: {\"choices\":[{\"delta\":{\"content\":\"dünya 🌍\"}}]}\n\n", "data: [DONE]\n\n"} {
+				for _, part := range []string{"data: {\"choices\":[{\"delta\":{\"content\":\"world 🌍\"}}]}\n\n", "data: [DONE]\n\n"} {
 					fmt.Fprint(w, part)
 					w.(http.Flusher).Flush()
 				}
@@ -61,7 +61,7 @@ func TestProtocolAndFragmentedUnicode(t *testing.T) {
 	}
 	text := ""
 	err = bound.Stream(context.Background(), nil, nil, func(item map[string]any) error { raw, _ := json.Marshal(item); text += string(raw); return nil })
-	if err != nil || !strings.Contains(text, "dünya 🌍") {
+	if err != nil || !strings.Contains(text, "world 🌍") {
 		t.Fatal(text, err)
 	}
 	changed = true
