@@ -1,6 +1,6 @@
 # Pliqra 2.1.0 — active/active multi-DC validation
 
-The published distribution is **[2.1.0-rc.1](releases/v2.1.0-rc.1.md)**. [Distribution](DISTRIBUTION.md) documents image verification and the tag-triggered publication gate; the functional acceptance evidence below describes the 2.1 baseline.
+The published distribution is **[2.1.0-rc.2](releases/v2.1.0-rc.2.md)**. [Distribution](DISTRIBUTION.md) documents image verification and the tag-triggered publication gate; the functional acceptance evidence below describes the 2.1 baseline.
 
 Validated 6 November 2026. The [2.0 validation record](RELEASE_2_0.md) and [1.2 record](RELEASE_1_2.md) remain available as history. The deployment contract, including infrastructure responsibilities, is in [MULTI_DC.md](MULTI_DC.md).
 

@@ -4,13 +4,13 @@
 
 ## Install the release candidate
 
-**2.1.0-rc.1 is a prerelease for evaluation and acceptance testing.** It is not a production-capacity, availability or vendor certification. Docker with Compose is required. Linux AMD64 and ARM64 images are published at `ghcr.io/etrkk5/pliqra:2.1.0-rc.1`; Docker Desktop on macOS/Windows runs the matching Linux image.
+**2.1.0-rc.2 is a prerelease for evaluation and acceptance testing.** It is not a production-capacity, availability or vendor certification. Docker with Compose is required. Linux AMD64 and ARM64 images are published at `ghcr.io/etrkk5/pliqra:2.1.0-rc.2`; Docker Desktop on macOS/Windows runs the matching Linux image.
 
 No source checkout, local build or registry login is required:
 
 ```sh
 mkdir pliqra && cd pliqra
-curl -fL -o compose.release.yaml https://github.com/etrkk5/pliqra/releases/download/v2.1.0-rc.1/compose.release.yaml
+curl -fL -o compose.release.yaml https://github.com/etrkk5/pliqra/releases/download/v2.1.0-rc.2/compose.release.yaml
 docker compose -f compose.release.yaml pull
 docker compose -f compose.release.yaml up -d
 ```
@@ -21,7 +21,7 @@ The named `pliqra-data` volume holds the workspace and local encryption key. To 
 
 ## Pin and verify
 
-The [GitHub release](https://github.com/etrkk5/pliqra/releases/tag/v2.1.0-rc.1) includes:
+The [GitHub release](https://github.com/etrkk5/pliqra/releases/tag/v2.1.0-rc.2) includes:
 
 - `compose.release.yaml`: installation using the exact version tag, without `build`.
 - `image.txt`: the exact multi-platform OCI digest reference.

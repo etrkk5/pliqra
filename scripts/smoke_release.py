@@ -16,7 +16,7 @@ def smoke(base: str, version: str) -> None:
         try:
             health = json.loads(read("/healthz"))
             break
-        except (URLError, TimeoutError):
+        except (URLError, TimeoutError, ConnectionError):
             if time.monotonic() >= deadline:
                 raise
             time.sleep(1)

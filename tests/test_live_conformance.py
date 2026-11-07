@@ -54,3 +54,25 @@ def test_independent_reference_core_profile_over_http(monkeypatch):
             report=run(Pliqra(url,'synthetic-reference-key'),'reference-chat',invoke=True)
     assert report['passed'],json.dumps(report)
     assert len(report['results'])==9
+
+
+def test_release_smoke_waits_for_connection_reset_during_startup(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from pliqra.main import create_app
+    from pliqra import __version__
+    from scripts import smoke_release
+
+    original = smoke_release.urlopen
+    attempts = []
+
+    def starting_container(url, **kwargs):
+        attempts.append(url)
+        if len(attempts) == 1:
+            raise ConnectionResetError('Container listener is not ready yet')
+        return original(url, **kwargs)
+
+    monkeypatch.setattr(smoke_release, 'urlopen', starting_container)
+    app = create_app(tmp_path)
+    with TestClient(app), gateway_server(app) as url:
+        smoke_release.smoke(url, __version__)
+    assert attempts[:2] == [url + '/healthz', url + '/healthz']
