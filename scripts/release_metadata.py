@@ -24,7 +24,7 @@ def metadata(tag: str, root: Path = ROOT) -> dict:
         raise ValueError(f"Missing release notes: {notes}")
     compose = (root / "compose.release.yaml").read_text()
     image = re.search(r"^\s*image:\s*\$\{PLIQRA_IMAGE:-([^}]+)\}\s*$", compose, re.MULTILINE)
-    if not image or image[1] != f"ghcr.io/etrkk5/pliqra:{version}":
+    if not image or image[1] != f"ghcr.io/eturkok/pliqra:{version}":
         raise ValueError("Prebuilt Compose must default to the exact release version")
     return {"tag": tag, "version": version, "prerelease": "true" if match[4] else "false", "notes": notes}
 

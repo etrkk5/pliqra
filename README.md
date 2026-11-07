@@ -5,7 +5,7 @@
 <h1 align="center">Pliqra</h1>
 <p align="center"><strong>Plug in models. Publish your rules. Keep the contract.</strong><br>Turn a model endpoint into an AI service with an explicit connection contract.</p>
 <p align="center">
-  <a href="https://github.com/etrkk5/pliqra/actions/workflows/test.yml"><img src="https://github.com/etrkk5/pliqra/actions/workflows/test.yml/badge.svg" alt="Tests"></a>
+  <a href="https://github.com/eturkok/pliqra/actions/workflows/test.yml"><img src="https://github.com/eturkok/pliqra/actions/workflows/test.yml/badge.svg" alt="Tests"></a>
   · <a href="#quick-start">Quick start</a>
   · <a href="#multi-dc">Multi-DC</a>
   · <a href="docs/CONSOLE.md">Console tour</a>
@@ -28,7 +28,8 @@ Pliqra combines a model-as-a-service catalog, inference routing, custom gateway 
 | **Composable guardrails** | Chain local checks, NeMo check-API providers and custom HTTP validators on input/output. Enforce or observe; apply local redaction and inspect recorded verdicts. |
 | **An explanation for every call** | Follow routing, fallback attempts, guardrail decisions, timing, tokens and estimated costs. Administrators see cumulative totals and team-level detail. |
 | **Publish with evidence** | Version prompts, queue durable batches, compare models with external judges, and gate canary releases on fresh quality evidence. |
-| **One policy across interfaces** | Chat, embeddings, speech/transcription, Responses, Messages and Ollama through the same admission and accounting boundary. |
+| **One policy across interfaces** | Chat, embeddings, audio and native APIs through one admission/accounting boundary, with live Responses/Messages text and tool streaming. |
+| **Govern independent installations** | Pair workspaces, filter combined usage, review policy changes with a second administrator, and track delivery and drift from one console. |
 | **Start small, scale across sites** | One Docker image by default. Add PostgreSQL, isolated organizations, analytics and active/active data centers when needed. |
 | **Identity without platform lock-in** | OIDC/SAML/SCIM, signed logout, short-lived workload identities and environment/file/Vault secret references. |
 
@@ -38,14 +39,14 @@ With Docker Compose and a running model endpoint, use the **prebuilt AMD64/ARM64
 
 ```sh
 mkdir pliqra && cd pliqra
-curl -fL -o compose.release.yaml https://github.com/etrkk5/pliqra/releases/download/v2.1.0-rc.2/compose.release.yaml
+curl -fL -o compose.release.yaml https://github.com/eturkok/pliqra/releases/download/v2.1.0-rc.3/compose.release.yaml
 docker compose -f compose.release.yaml pull
 docker compose -f compose.release.yaml up -d
 ```
 
 Open **http://localhost:8088**, create your administrator, then follow **connect endpoint → make a real call → connect application**. Your workspace starts empty; the model endpoint must be reachable from inside the container.
 
-**2.1.0-rc.2 is a release candidate for evaluation.** No source checkout, local build or registry login is required. [Release notes & downloads →](https://github.com/etrkk5/pliqra/releases/tag/v2.1.0-rc.2)
+**2.1.0-rc.3 is a release candidate for evaluation.** No source checkout, local build or registry login is required. [Release notes & downloads →](https://github.com/eturkok/pliqra/releases/tag/v2.1.0-rc.3)
 
 [Image verification & upgrades →](docs/DISTRIBUTION.md) · [Source build & first call →](docs/GETTING_STARTED.md) · [Two-replica installation →](docs/PLATFORM.md#start-two-gateways)
 
@@ -74,11 +75,14 @@ Admitted calls can finish during draining. Disconnected sites stop admitting new
 | [Active/active data centers](docs/MULTI_DC.md) | Shared quota authority, local routing, DC drain and safe recovery |
 | [Scale & organizations](docs/PLATFORM.md) | PostgreSQL, distributed admission, isolated workspaces and analytics |
 | [Identity compatibility](docs/IDENTITY_COMPATIBILITY.md) | Real Keycloak evidence, vendor profiles, workload trust and secret sources |
+| [Fleet management](docs/FLEET.md) | Independent workspaces, combined visibility, reviewed policy rollout and drift |
+| [Install application SDKs](docs/SDK.md) | Python / JavaScript packages and checked release artifacts |
+| [Synthetic customer acceptance](docs/ACCEPTANCE.md) | Installed applications, load/soak measurements, interruption and recovery evidence |
 | [Clients & conformance](docs/CONFORMANCE.md) | Python, JavaScript/TypeScript, Go and an executable protocol profile |
 | [Technical architecture review](docs/TECHNICAL_REVIEW.md) | Findings, corrected designs, regression evidence and deployment boundaries |
 | [Validation & scope](docs/RELEASE.md) | Automated/runtime evidence, exercised flows and operating limits |
 
-**Current candidate: [2.1.0-rc.2](https://github.com/etrkk5/pliqra/releases/tag/v2.1.0-rc.2).** The default remains a single container. Protocol draft 0.1; native APIs are documented subsets. [Roadmap delivery](docs/ROADMAP.md) separates implemented scope from external vendor acceptance and ecosystem adoption.
+**Current candidate: [2.1.0-rc.3](https://github.com/eturkok/pliqra/releases/tag/v2.1.0-rc.3).** The default remains a single container. Protocol draft 0.1; native APIs are documented subsets. [Roadmap delivery](docs/ROADMAP.md) separates implemented scope from external vendor acceptance and ecosystem adoption.
 
 ## License
 

@@ -77,3 +77,12 @@ These images use a separate disposable workspace with synthetic providers and ex
 ![Two active gateway sites sharing one authority](screenshots/multi-dc.png)
 
 The screenshot is from the disposable local two-site acceptance environment. See [multi-DC deployment and failure semantics](MULTI_DC.md).
+
+## Independent installations in RC3
+
+**Advanced tools → Fleet management** brings independent Pliqra workspaces into one metadata dashboard. Filter by installation and its team, inspect freshness and drift, pair explicit controllers and prepare shared gateway policies with local resource mappings. A different administrator reviews the immutable plan; delivery and rollback stay visible per target.
+
+![Fleet overview](screenshots/fleet-management.jpg)
+![Immutable policy review and delivery](screenshots/fleet-policy-review.jpg)
+
+These screenshots come from the isolated synthetic customer lab. [Fleet authority and API details](FLEET.md) · [Repeatable acceptance](ACCEPTANCE.md)

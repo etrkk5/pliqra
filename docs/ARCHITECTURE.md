@@ -194,7 +194,7 @@ flowchart LR
     Gates --> Control
 ```
 
-Inference keeps one admission/settlement boundary across interfaces. `model_operations.py` and `native.py` adapt to that boundary; text-only checks reject incompatible binary/vector stages. Native streaming adapters buffer and label their delivery. Prompt expansion is literal and versioned. Durable batches call the same boundary per item and retain interrupted status rather than replaying started work.
+Inference keeps one admission/settlement boundary across interfaces. `model_operations.py` and `native.py` adapt to that boundary; text-only checks reject incompatible binary/vector stages. Native Responses/Messages adapters stream incrementally and label delivery; full-output checks retain buffering. Prompt expansion is literal and versioned. Durable batches call the same boundary per item and retain interrupted status rather than replaying started work.
 
 `postgres.py` owns schema isolation, migration and workspace write locking; `cluster.py` owns heartbeats, distributed leases and fencing. `organizations.py` mounts distinct account/storage/session contexts and derives organization keys. `platform.py` exports metadata idempotently to an optional separate database. `quality.py` binds publication evidence to actual dataset/judge/service versions and records stable/canary selection. `secrets.py` and `workload_identity.py` keep external credentials and machine grants explicit.
 
@@ -203,3 +203,7 @@ Inference keeps one admission/settlement boundary across interfaces. `model_oper
 ## 2.1 multi-DC execution
 
 [Multi-DC architecture](MULTI_DC.md) preserves one PostgreSQL admission authority across active gateway sites. Model placement belongs to the service contract; health/circuit observations belong to the observing site. Database time governs leases and admission windows. `topology.py` defines location constraints and audited site modes; `cluster.py` enforces admission/readiness and optional supervised restart. Candidate/fingerprint reads use batched queries to avoid per-model WAN round trips. Location restrictions also apply to canary candidates and cache-producing models. The database platform must prevent independent writers and preserve acknowledged state through promotion.
+
+## Independent installation management
+
+`fleet.py` mounts explicit scoped member trust and controller APIs in the same application. `fleet_schema.py` adds durable pairing, snapshot, proposal, delivery-claim and receipt tables. Policy application reuses the canonical gateway validator and contract fingerprints, commits per member, and never performs inference inside a configuration transaction. The controller stores encrypted member tokens; members store only token hashes. Separate administrators approve immutable plans, local writes are checked for drift, and unknown delivery is retried by operation ID. Snapshots whitelist metadata and exclude stale members from totals. Independent members retain their own quota authority. See [Fleet](FLEET.md) for trust boundaries and [acceptance](ACCEPTANCE.md) for evidence.

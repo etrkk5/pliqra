@@ -1,0 +1,87 @@
+# Disposable synthetic customer lab. Never connect real provider credentials here.
+x-gateway: &gateway
+  image: ${PLIQRA_ACCEPTANCE_IMAGE:-pliqra:rc3-acceptance}
+  depends_on:
+    database:
+      condition: service_healthy
+  restart: unless-stopped
+x-environment: &environment
+  PLIQRA_DATABASE_URL: postgresql://postgres:synthetic-acceptance-password@database:5432/pliqra?sslmode=verify-full&sslrootcert=/fixture/ca.pem
+  PLIQRA_DATABASE_SCHEMA: customer_shared
+  PLIQRA_ENCRYPTION_KEY: ${PLIQRA_ACCEPTANCE_KEY:?Run the acceptance setup first}
+  PLIQRA_MULTI_DC: '1'
+  PLIQRA_REGION: synthetic-eu
+  PLIQRA_TLS_CERTFILE: /fixture/gateway.crt
+  PLIQRA_TLS_KEYFILE: /fixture/gateway.key
+  PLIQRA_CA_BUNDLE: /fixture/ca.pem
+  PLIQRA_RESTART_ON_FENCE: '1'
+services:
+  database:
+    image: postgres:18-bookworm
+    environment:
+      POSTGRES_DB: pliqra
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: synthetic-acceptance-password
+    command: ['sh','-ec','cp /fixture/database.key /tmp/server.key; chown postgres:postgres /tmp/server.key; chmod 600 /tmp/server.key; exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/fixture/database.crt -c ssl_key_file=/tmp/server.key']
+    volumes:
+      - database:/var/lib/postgresql
+      - ${PLIQRA_ACCEPTANCE_STATE:?}/pki:/fixture:ro
+    healthcheck:
+      test: ['CMD-SHELL','pg_isready -U postgres -d pliqra']
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  model-west:
+    image: python:3.13-slim
+    command: ['python','/fixture/provider.py']
+    volumes: ['./provider.py:/fixture/provider.py:ro']
+    ports: ['127.0.0.1:18095:8099']
+  model-east:
+    image: python:3.13-slim
+    command: ['python','/fixture/provider.py']
+    volumes: ['./provider.py:/fixture/provider.py:ro']
+    ports: ['127.0.0.1:18096:8099']
+  gateway-west:
+    <<: *gateway
+    environment:
+      <<: *environment
+      PLIQRA_SITE: dc-west
+    ports: ['127.0.0.1:18091:8080']
+    volumes:
+      - west:/data
+      - ${PLIQRA_ACCEPTANCE_STATE:?}/pki:/fixture:ro
+  gateway-east:
+    <<: *gateway
+    environment:
+      <<: *environment
+      PLIQRA_SITE: dc-east
+    ports: ['127.0.0.1:18092:8080']
+    volumes:
+      - east:/data
+      - ${PLIQRA_ACCEPTANCE_STATE:?}/pki:/fixture:ro
+  gateway-branch:
+    <<: *gateway
+    environment:
+      <<: *environment
+      PLIQRA_DATABASE_SCHEMA: customer_branch
+      PLIQRA_SITE: branch
+      PLIQRA_REGION: synthetic-us
+      PLIQRA_ENCRYPTION_KEY: ${PLIQRA_ACCEPTANCE_BRANCH_KEY:?}
+    ports: ['127.0.0.1:18093:8080']
+    volumes:
+      - branch:/data
+      - ${PLIQRA_ACCEPTANCE_STATE:?}/pki:/fixture:ro
+  controller:
+    image: ${PLIQRA_ACCEPTANCE_IMAGE:-pliqra:rc3-acceptance}
+    environment:
+      PLIQRA_CA_BUNDLE: /fixture/ca.pem
+    ports: ['127.0.0.1:18094:8080']
+    volumes:
+      - controller:/data
+      - ${PLIQRA_ACCEPTANCE_STATE:?}/pki:/fixture:ro
+volumes:
+  database:
+  west:
+  east:
+  branch:
+  controller:

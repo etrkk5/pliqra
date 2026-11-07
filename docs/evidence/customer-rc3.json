@@ -1,0 +1,145 @@
+{
+  "synthetic": true,
+  "real_customer_reference": false,
+  "environment": {
+    "host": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+    "machine": "arm64",
+    "physical_hosts": 1,
+    "database": "PostgreSQL 18, one primary with verified fixture TLS",
+    "site_regions_are_synthetic": true,
+    "image": "pliqra:rc3-acceptance",
+    "image_id": "sha256:0303666893f95b969412f9e5d980dc1a9ef9f3899f935765ac986f83f1cafa0b",
+    "source_revision": "386defb24aac5bda686e159e63f0286494a25dd0",
+    "source_dirty": true,
+    "docker_cpus": 14,
+    "docker_memory_bytes": 8318976000,
+    "runtime_python_source_sha256": "c99bdd687f7cb8c7ad489d80ec138707efd0327fa75123704e6e81933c524368",
+    "final_source_python_matches_tested_image": true
+  },
+  "checks": [
+    {
+      "check": "onboarding_endpoint_discovery_pricing_and_scoped_key",
+      "passed": true
+    },
+    {
+      "check": "two_site_local_routing",
+      "passed": true
+    },
+    {
+      "check": "global_quota_exact_under_concurrency",
+      "passed": true,
+      "accepted": 8,
+      "rejected": 8
+    },
+    {
+      "check": "independent_fleet_pairing_separate_approval_and_delivery",
+      "passed": true,
+      "members": 2
+    },
+    {
+      "check": "native_incremental_delivery_and_incomplete_stream_rejection",
+      "passed": true,
+      "cases": [
+        {
+          "service": "synthetic-responses",
+          "interface": "responses",
+          "first_delta_ms": 76.92,
+          "complete_ms": 177.71
+        },
+        {
+          "service": "synthetic-responses",
+          "interface": "messages",
+          "first_delta_ms": 76.24,
+          "complete_ms": 187.06
+        },
+        {
+          "service": "synthetic-messages",
+          "interface": "responses",
+          "first_delta_ms": 80.79,
+          "complete_ms": 226.69
+        },
+        {
+          "service": "synthetic-messages",
+          "interface": "messages",
+          "first_delta_ms": 71.99,
+          "complete_ms": 212.05
+        },
+        {
+          "service": "customer-chat",
+          "interface": "responses",
+          "first_delta_ms": 11.49,
+          "complete_ms": 120.4
+        },
+        {
+          "service": "customer-chat",
+          "interface": "messages",
+          "first_delta_ms": 13.91,
+          "complete_ms": 109.7
+        }
+      ]
+    },
+    {
+      "check": "load_measurement",
+      "passed": true
+    },
+    {
+      "check": "soak_measurement",
+      "passed": true
+    },
+    {
+      "check": "pre_stream_model_failure_falls_back_to_allowed_remote_site",
+      "passed": true
+    },
+    {
+      "check": "database_restart_fail_closed_no_new_model_calls_and_fresh_process_rejoin",
+      "passed": true,
+      "primary_promotion_tested": false
+    }
+  ],
+  "load": {
+    "duration_seconds": 30.11,
+    "concurrency": 8,
+    "target_requests_per_second": null,
+    "requests": 3032,
+    "statuses": {
+      "200": 3032
+    },
+    "observed_requests_per_second": 100.7,
+    "p50_ms": 72.74,
+    "p95_ms": 92.71,
+    "p99_ms": 106.94,
+    "gateway_west_rss_kib": [
+      108436
+    ],
+    "synthetic_model_delay_ms": 5,
+    "not_a_production_capacity_claim": true
+  },
+  "soak": {
+    "duration_seconds": 601.3,
+    "concurrency": 8,
+    "target_requests_per_second": 5,
+    "requests": 3000,
+    "statuses": {
+      "200": 3000
+    },
+    "observed_requests_per_second": 4.99,
+    "p50_ms": 85.4,
+    "p95_ms": 99.13,
+    "p99_ms": 110.94,
+    "gateway_west_rss_kib": [
+      108440,
+      108456,
+      108552,
+      108584,
+      108680,
+      108732,
+      109176,
+      109232,
+      109352,
+      109656
+    ],
+    "synthetic_model_delay_ms": 5,
+    "not_a_production_capacity_claim": true
+  },
+  "passed": true
+}

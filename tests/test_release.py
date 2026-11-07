@@ -9,7 +9,7 @@ def release_tree(tmp_path: Path, version: str) -> Path:
     (tmp_path / "pliqra/__init__.py").write_text(f'__version__ = "{version}"\n')
     (tmp_path / "docs/releases").mkdir(parents=True)
     (tmp_path / f"docs/releases/v{version}.md").write_text("Release notes\n")
-    (tmp_path / "compose.release.yaml").write_text("image: ${PLIQRA_IMAGE:-ghcr.io/etrkk5/pliqra:" + version + "}\n")
+    (tmp_path / "compose.release.yaml").write_text("image: ${PLIQRA_IMAGE:-ghcr.io/eturkok/pliqra:" + version + "}\n")
     return tmp_path
 
 
@@ -34,6 +34,6 @@ def test_release_requires_matching_version_notes_and_installation(tmp_path):
     with pytest.raises(ValueError, match="Missing release notes"):
         metadata("v2.1.0-rc.1", root)
     notes.write_text("Notes")
-    (root / "compose.release.yaml").write_text("image: ${PLIQRA_IMAGE:-ghcr.io/etrkk5/pliqra:2.1.0-rc.10}\n")
+    (root / "compose.release.yaml").write_text("image: ${PLIQRA_IMAGE:-ghcr.io/eturkok/pliqra:2.1.0-rc.10}\n")
     with pytest.raises(ValueError, match="exact release version"):
         metadata("v2.1.0-rc.1", root)

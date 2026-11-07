@@ -96,6 +96,8 @@ jobs:
           docker pull --platform "$PLATFORM" "$IMAGE"
           test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE")" = "$REVISION"
           test "$(docker image inspect --format '{{ .Config.User }}' "$IMAGE")" = 'pliqra:pliqra'
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.licenses" }}' "$IMAGE")" = 'Apache-2.0'
+          docker run --rm --entrypoint python "$IMAGE" -c "from pathlib import Path; assert 'Apache License' in Path('/app/LICENSE').read_text(); assert 'Pliqra' in Path('/app/NOTICE').read_text()"
           docker run -d --name pliqra-release-check -p 127.0.0.1:8088:8080 "$IMAGE"
           trap 'docker logs pliqra-release-check; docker rm -fv pliqra-release-check' EXIT
           python scripts/smoke_release.py http://127.0.0.1:8088 "$VERSION"
@@ -104,6 +106,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: read
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       RELEASE_TAG: ${{ github.ref_name }}
@@ -121,25 +124,28 @@ jobs:
         run: |
           set -eu
           mkdir -p dist
+          gh run download "$GITHUB_RUN_ID" --name sdk-packages --dir dist
           cp compose.release.yaml dist/compose.release.yaml
           cp docs/DISTRIBUTION.md dist/DISTRIBUTION.md
           printf 'ghcr.io/%s@%s\n' "$GITHUB_REPOSITORY" "$DIGEST" > dist/image.txt
           python - <<'PY'
-          import json, os
+          import ast, json, os
           from pathlib import Path
+          def constant(filename, name):
+              return next(ast.literal_eval(n.value) for n in ast.parse(Path(filename).read_text()).body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in n.targets))
           Path('dist/release.json').write_text(json.dumps({
               'tag': os.environ['RELEASE_TAG'], 'version': os.environ['VERSION'],
               'revision': os.environ['GITHUB_SHA'], 'image': 'ghcr.io/' + os.environ['GITHUB_REPOSITORY'],
               'digest': os.environ['DIGEST'], 'platforms': ['linux/amd64', 'linux/arm64'],
-              'prerelease': os.environ['PRERELEASE'] == 'true', 'schema': 5,
-              'inference_contract': 4, 'protocol': 'pliqra/0.1-draft'
+              'prerelease': os.environ['PRERELEASE'] == 'true', 'schema': constant('pliqra/db.py','SCHEMA_VERSION'),
+              'inference_contract': int(constant('pliqra/inference_schema.py','INFERENCE_CONTRACT_REVISION').split('/')[-1]), 'protocol': 'pliqra/0.1-draft'
           }, indent=2) + '\n')
           PY
-          (cd dist && sha256sum compose.release.yaml DISTRIBUTION.md image.txt release.json > SHA256SUMS)
+          (cd dist && sha256sum compose.release.yaml DISTRIBUTION.md image.txt release.json SDK-MANIFEST.json *.whl *.tar.gz *.tgz > SHA256SUMS)
           cp "$NOTES" dist/notes.md
           printf '\n## Exact image\n\n`ghcr.io/%s@%s`\n\nAMD64 and ARM64; SBOM and build provenance are attached to the OCI image.\n' "$GITHUB_REPOSITORY" "$DIGEST" >> dist/notes.md
           if [ "$PRERELEASE" = true ]; then
-            gh release create "$RELEASE_TAG" --verify-tag --title "Pliqra $VERSION" --prerelease --latest=false --notes-file dist/notes.md dist/compose.release.yaml dist/DISTRIBUTION.md dist/image.txt dist/release.json dist/SHA256SUMS
+            gh release create "$RELEASE_TAG" --verify-tag --title "Pliqra $VERSION" --prerelease --latest=false --notes-file dist/notes.md dist/compose.release.yaml dist/DISTRIBUTION.md dist/image.txt dist/release.json dist/SHA256SUMS dist/SDK-MANIFEST.json dist/*.whl dist/*.tar.gz dist/*.tgz
           else
-            gh release create "$RELEASE_TAG" --verify-tag --title "Pliqra $VERSION" --latest --notes-file dist/notes.md dist/compose.release.yaml dist/DISTRIBUTION.md dist/image.txt dist/release.json dist/SHA256SUMS
+            gh release create "$RELEASE_TAG" --verify-tag --title "Pliqra $VERSION" --latest --notes-file dist/notes.md dist/compose.release.yaml dist/DISTRIBUTION.md dist/image.txt dist/release.json dist/SHA256SUMS dist/SDK-MANIFEST.json dist/*.whl dist/*.tar.gz dist/*.tgz
           fi

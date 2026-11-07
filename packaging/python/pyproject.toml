@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools==84.2.1", "wheel==0.48.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pliqra-client"
+version = "0.1.0rc1"
+description = "Dependency-free Pliqra model discovery, binding and inference client"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{name = "Pliqra contributors"}]
+keywords = ["pliqra", "llm", "gateway", "inference", "protocol"]
+
+[project.urls]
+Homepage = "https://github.com/eturkok/pliqra"
+Documentation = "https://github.com/eturkok/pliqra/blob/main/docs/CONFORMANCE.md"
+Issues = "https://github.com/eturkok/pliqra/issues"
+
+[project.scripts]
+pliqra-client = "pliqra_client:main"
+pliqra-conformance = "pliqra_conformance:main"
+
+[tool.setuptools]
+py-modules = ["pliqra_client", "pliqra_conformance"]

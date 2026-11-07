@@ -5,7 +5,7 @@ from typing import Annotated, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
-INFERENCE_CONTRACT_REVISION = 'pliqra-inference/4'
+INFERENCE_CONTRACT_REVISION = 'pliqra-inference/5'
 
 
 class Message(BaseModel):

@@ -27,21 +27,24 @@ def test_anthropic_upstream_adapter_translates_tools_and_authentication(workspac
     asyncio.run(mock.aclose())
 
 
-def test_responses_upstream_uses_stateless_bounded_buffer_for_chat_stream(workspace):
+def test_responses_upstream_uses_stateless_live_chat_stream(workspace):
     client,app,_=workspace
     service=connect(client,endpoint='https://responses.test/v1',provider='responses',model='synthetic-response')['services'][0]
     captured=[]
     def handler(request):
         captured.append(json.loads(request.content))
-        return httpx.Response(200,json={'status':'completed','output':[{'type':'message','content':[{'type':'output_text','text':'Native response'}]}],'usage':{'input_tokens':5,'output_tokens':2}})
+        from tests.test_native_streaming import responses_events,EventStream
+        return httpx.Response(200,stream=EventStream(responses_events()),headers={'content-type':'text/event-stream'})
     mock=swap_upstream(app,handler)
     result=call(client,service['name'],stream=True,max_tokens=64)
     assert result.status_code==200,result.text
-    assert '[DONE]' in result.text and 'Native response' in result.text
-    assert captured[0]['store'] is False and captured[0]['stream'] is False
+    assert '[DONE]' in result.text
+    chunks=[json.loads(line[5:]) for line in result.text.splitlines() if line.startswith('data:') and '[DONE]' not in line]
+    assert ''.join(c.get('delta',{}).get('content','') for chunk in chunks for c in chunk.get('choices',[]))=='Native response'
+    assert captured[0]['store'] is False and captured[0]['stream'] is True
     assert captured[0]['max_output_tokens']==64
-    assert result.headers['X-Pliqra-Delivery']=='adapter_buffer'
-    assert 'streaming' not in json.loads(app.state.store.one('SELECT verified FROM deployments')['verified'])
+    assert result.headers['X-Pliqra-Delivery']=='live_stream'
+    assert 'streaming' in json.loads(app.state.store.one('SELECT verified FROM deployments')['verified'])
     asyncio.run(mock.aclose())
 
 

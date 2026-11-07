@@ -379,7 +379,7 @@ class Gateway:
         streaming=False
         cache_id=None
         forced=body.get('tool_choice',body.get('function_call')) not in (None,'auto')
-        buffered=bool(body.get('stream') and (self.policies.buffered(policy) or forced or any(d['provider'] in ('responses','anthropic') for d in candidates)))
+        buffered=bool(body.get('stream') and (self.policies.buffered(policy) or forced))
         delivery=('guarded_buffer' if self.policies.buffered(policy) else 'adapter_buffer') if buffered else 'live_stream' if body.get('stream') else 'json'
         try:
             if not policy and not any(d.get('release_id') for d in candidates) and port.get('cache_ttl',0)>0 and not body.get('stream') and not requests_tools(body) and kind=='inference':
@@ -448,9 +448,12 @@ class Gateway:
             self.store.update('connections',chosen['connection_id'],{'status':'connected','last_checked':now(),'last_error':None})
             if body.get('stream') and not buffered:
                 async def iterator():
+                    chunks=self.stream(response,chosen,event_id,started)
                     try:
-                        async for chunk in self.stream(response,chosen,event_id,started):yield chunk
-                    finally:release()
+                        async for chunk in chunks:yield chunk
+                    finally:
+                        await chunks.aclose()
+                        release()
                 streaming=True
                 return StreamingResponse(iterator(),media_type='text/event-stream',headers={'X-Request-ID':event_id,'X-Pliqra-Model':chosen['model'],'X-Pliqra-Delivery':delivery,**model_headers(self,chosen),**({'X-Pliqra-Gateway':policy['id']} if policy else {}),'Cache-Control':'no-cache','X-Accel-Buffering':'no'},background=BackgroundTask(release))
             data=await response_json(response)
@@ -516,7 +519,11 @@ class Gateway:
         tool_index=0
         tool_seen=False
         try:
-            async for line in bounded_lines(response):
+            lines=bounded_lines(response)
+            if deployment['provider'] in ('responses','anthropic'):
+                from .native_streaming import upstream_lines
+                lines=upstream_lines(response,deployment['provider'],event_id,deployment['model'])
+            async for line in lines:
                 if capture and capture_size<64000:
                     captured.append(line.encode('utf-8')[:max(0,63999-capture_size)].decode('utf-8',errors='ignore'));capture_size+=len(line.encode('utf-8'))+1
                 if not line.strip():
@@ -569,8 +576,8 @@ class Gateway:
             if not terminal:
                 error = "Upstream stream ended without its completion marker"
                 yield sse({"error": {"message": error, "request_id": event_id, "type": "incomplete_stream"}})
-        except asyncio.CancelledError:
-            self.finish(event_id, started, deployment, "cancelled", usage, ttft, "Client disconnected; upstream cancellation requested")
+        except (asyncio.CancelledError,GeneratorExit):
+            if not terminal:self.finish(event_id, started, deployment, "cancelled", usage, ttft, "Client disconnected; upstream cancellation requested")
             raise
         except (httpx.HTTPError, ValueError, TypeError, KeyError, AttributeError):
             error = "Upstream stream failed; no fallback was attempted after streaming started"

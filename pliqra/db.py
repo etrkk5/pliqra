@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .storage_schema import BASE_SCHEMA
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 def uid(prefix=""):
@@ -168,6 +168,8 @@ class SQLiteStore:
                 if name not in self.columns('runtime_nodes'):self.run(f'ALTER TABLE runtime_nodes ADD COLUMN {name} {definition}')
             for name,definition in {'node_id':'TEXT','cancel_requested':'INTEGER NOT NULL DEFAULT 0','dataset_hash':'TEXT','judge_id':'TEXT','min_judge_score':'REAL'}.items():
                 if name not in existing:self.run(f'ALTER TABLE evaluations ADD COLUMN {name} {definition}')
+            from .fleet_schema import SCHEMA as FLEET_SCHEMA
+            for statement in FLEET_SCHEMA:self.run(statement)
             self.set_schema_version(SCHEMA_VERSION)
             if self.backend=='sqlite':self.run("UPDATE gateway_requests SET status='interrupted' WHERE status='pending'")
         if self.backend=='sqlite':self.run("UPDATE evaluations SET status='interrupted',error='Gateway restarted during evaluation',finished=? WHERE status IN ('queued','running')", (now(),))

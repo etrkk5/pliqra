@@ -1,8 +1,12 @@
-# Pliqra 2.1.0 — active/active multi-DC validation
+# Pliqra 2.1 — validation and scope
 
-The published distribution is **[2.1.0-rc.2](releases/v2.1.0-rc.2.md)**. [Distribution](DISTRIBUTION.md) documents image verification and the tag-triggered publication gate; the functional acceptance evidence below describes the 2.1 baseline.
+The published distribution is **[2.1.0-rc.3](releases/v2.1.0-rc.3.md)**. [Distribution](DISTRIBUTION.md) documents image verification and the tag-triggered publication gate; the functional acceptance evidence below describes the 2.1 baseline.
 
-Validated 6 November 2026. The [2.0 validation record](RELEASE_2_0.md) and [1.2 record](RELEASE_1_2.md) remain available as history. The deployment contract, including infrastructure responsibilities, is in [MULTI_DC.md](MULTI_DC.md).
+The RC3 additions were validated on 7 November 2026; [synthetic acceptance](ACCEPTANCE.md) records streaming, SDK, fleet, load and recovery evidence. The multi-DC baseline below was validated on 6 November 2026. The [2.0 validation record](RELEASE_2_0.md) and [1.2 record](RELEASE_1_2.md) remain available as history. The deployment contract, including infrastructure responsibilities, is in [MULTI_DC.md](MULTI_DC.md).
+
+## RC3 additions
+
+The final local Python 3.14 suite passes **205 tests**, with a real PostgreSQL 18 service configured, including the fleet and existing scale/multi-DC cases. Both independently installed SDK applications and all six official-native-client scenarios pass against synthetic providers with verified TLS. The console was exercised for instance visibility, two-target resource mapping and immutable proposal creation; the author sees no self-approval control. No real customer feedback is claimed. [Delivery checklist](DELIVERY_RC3.md) · [Fleet](FLEET.md) · [SDK installation](SDK.md)
 
 ## Delivered behavior
 
@@ -17,7 +21,7 @@ The default stays one platform-independent Docker image with SQLite. Optional [m
 
 ## Automated evidence
 
-**159 Python tests pass** on host Python 3.14 with real PostgreSQL, including **23 PostgreSQL integration cases** (16 multi-DC and seven existing storage/scale cases). Without the test database URL, those integration cases skip explicitly. The Linux/Python 3.13 Docker suite exercises the same tests. JavaScript and Go client checks remain part of CI.
+The 6 November baseline had **159 passing Python tests** on host Python 3.14 with real PostgreSQL, including **23 PostgreSQL integration cases** (16 multi-DC and seven existing storage/scale cases). Without the test database URL, those integration cases skip explicitly. The Linux/Python 3.13 Docker suite exercises the same tests. JavaScript and Go client checks remain part of CI.
 
 The new cases cover concurrent global request admission; pending token reservations in gateway/key/user/project/team/service scopes; global concurrency; local model selection; drain while an admitted call runs; per-site health/circuits; strict placement and canary boundaries; database-clock admission; multi-host writable selection; manual endpoint recovery without discovery; and isolated storage-connection loss. Unit cases additionally reject SQLite/unverified remote databases in multi-DC mode and check placement/traffic-mode contract behavior.
 
@@ -38,6 +42,6 @@ The console was checked against this separate synthetic workspace: both active d
 - Disconnected gateways stop admitting calls. There are no offline quota allowances, independent writable DC copies or inference replay. Unknown usage remains reserved until reconciled or its documented window expires.
 - No production RTO/RPO, capacity or availability SLO is claimed. Shared database latency and serialized workspace writes affect throughput.
 - Model location labels are administrator declarations. Routing constraints do not certify physical/legal residency of databases, guards, judges, analytics, identities or backups.
-- Previously documented native API subsets, buffered native streaming, batch/archive limits and real-vendor acceptance boundaries remain. The prior Keycloak evidence is from the 2.0 validation; it was not presented as a new 2.1 vendor certification.
+- Native API subsets, batch/archive limits and real-vendor acceptance boundaries remain. RC3 adds live Responses/Messages streaming; complete-output checks still buffer. The prior Keycloak evidence is from the 2.0 validation; it was not presented as a new 2.1 vendor certification.
 
-2.1 uses schema **5**, inference contract revision **4** and wire protocol draft **0.1**. Stop old replicas, back up, upgrade every site and renew application bindings. See [the upgrade procedure](MULTI_DC.md#evidence-and-upgrade).
+RC3 uses schema **6**, inference contract revision **5** and wire protocol draft **0.1**. Stop old replicas, back up, upgrade every site and renew application bindings. See [the upgrade procedure](MULTI_DC.md#evidence-and-upgrade).

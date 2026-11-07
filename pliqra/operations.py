@@ -119,7 +119,7 @@ def restore_bytes(store, vault, archive, password):
     key = base64.urlsafe_b64encode(hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 600000))
     try:
         payload = json.loads(Fernet(key).decrypt(archive[25:]))
-        if payload["format"] not in ("pliqra-backup/1","modelport-backup/1") or payload["schema"] not in (2,3,4,SCHEMA_VERSION):
+        if payload["format"] not in ("pliqra-backup/1","modelport-backup/1") or payload["schema"] not in (2,3,4,5,SCHEMA_VERSION):
             raise ValueError()
         replacement = payload["key"].encode()
         Fernet(replacement)
@@ -134,7 +134,7 @@ def restore_bytes(store, vault, archive, password):
         path.write_bytes(raw)
         try:
             source = sqlite3.connect(path)
-            if source.execute("PRAGMA integrity_check").fetchone()[0] != "ok" or source.execute("PRAGMA user_version").fetchone()[0] not in (2,3,4,SCHEMA_VERSION):
+            if source.execute("PRAGMA integrity_check").fetchone()[0] != "ok" or source.execute("PRAGMA user_version").fetchone()[0] not in (2,3,4,5,SCHEMA_VERSION):
                 raise ValueError()
             if not source.execute("SELECT id FROM users WHERE role='admin' AND issuer='local' AND active=1").fetchone():
                 raise ValueError()

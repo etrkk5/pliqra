@@ -4,13 +4,13 @@
 
 ## Install the release candidate
 
-**2.1.0-rc.2 is a prerelease for evaluation and acceptance testing.** It is not a production-capacity, availability or vendor certification. Docker with Compose is required. Linux AMD64 and ARM64 images are published at `ghcr.io/etrkk5/pliqra:2.1.0-rc.2`; Docker Desktop on macOS/Windows runs the matching Linux image.
+**2.1.0-rc.3 is a prerelease for evaluation and acceptance testing.** It is not a production-capacity, availability or vendor certification. Docker with Compose is required. Linux AMD64 and ARM64 images are published at `ghcr.io/eturkok/pliqra:2.1.0-rc.3`; Docker Desktop on macOS/Windows runs the matching Linux image.
 
 No source checkout, local build or registry login is required:
 
 ```sh
 mkdir pliqra && cd pliqra
-curl -fL -o compose.release.yaml https://github.com/etrkk5/pliqra/releases/download/v2.1.0-rc.2/compose.release.yaml
+curl -fL -o compose.release.yaml https://github.com/eturkok/pliqra/releases/download/v2.1.0-rc.3/compose.release.yaml
 docker compose -f compose.release.yaml pull
 docker compose -f compose.release.yaml up -d
 ```
@@ -21,15 +21,16 @@ The named `pliqra-data` volume holds the workspace and local encryption key. To 
 
 ## Pin and verify
 
-The [GitHub release](https://github.com/etrkk5/pliqra/releases/tag/v2.1.0-rc.2) includes:
+The [GitHub release](https://github.com/eturkok/pliqra/releases/tag/v2.1.0-rc.3) includes:
 
 - `compose.release.yaml`: installation using the exact version tag, without `build`.
 - `image.txt`: the exact multi-platform OCI digest reference.
 - `release.json`: source commit, image digest, platforms, schema and protocol revisions.
 - `SHA256SUMS`: SHA-256 checksums of the attached installation/metadata files.
 - `DISTRIBUTION.md`: this guide.
+- `SDK-MANIFEST.json`, Python wheel/source distribution and npm tarball: tested standalone clients. [SDK installation →](SDK.md)
 
-Download `SHA256SUMS` and the four files it lists to one directory, then run `sha256sum -c SHA256SUMS` (macOS: `shasum -a 256 -c SHA256SUMS`). Checksums detect changed downloads; they are not an independent publisher signature. Pin the published digest when reproducibility matters:
+Download `SHA256SUMS` and the files it lists to one directory, then run `sha256sum -c SHA256SUMS` (macOS: `shasum -a 256 -c SHA256SUMS`). Checksums detect changed downloads; they are not an independent publisher signature. Pin the published digest when reproducibility matters:
 
 ```sh
 export PLIQRA_IMAGE="$(cat image.txt)"
@@ -57,6 +58,6 @@ Maintainers prepare the version, `docs/releases/vVERSION.md` and Compose referen
 
 ## Upgrade and recover
 
-Back up persistent data **and the encryption key**, stop the previous deployment, then pull/start the selected exact version. This RC uses **schema 5**, inference contract revision **4** and protocol draft **0.1**. Upgrade every shared-state replica together and renew old application bindings. See [multi-DC upgrade](MULTI_DC.md#evidence-and-upgrade).
+Back up persistent data **and the encryption key**, stop the previous deployment, then pull/start the selected exact version. This RC uses **schema 6**, inference contract revision **5** and protocol draft **0.1**. Upgrade every shared-state replica together and renew old application bindings. See [multi-DC upgrade](MULTI_DC.md#evidence-and-upgrade).
 
 Returning to an older image may require restoring its pre-upgrade backup: a newer database is not automatically downgraded. Keep the old image digest and an independently tested backup. [Operating limits](RELEASE.md) and [recovery procedures](OPERATIONS.md) still apply.

@@ -73,6 +73,8 @@ def mount(app):
         stats = store.one("SELECT COUNT(*) AS requests,COALESCE(SUM(tokens),0) AS tokens,COALESCE(SUM(CASE WHEN status='blocked' THEN 1 ELSE 0 END),0) AS blocked,COALESCE(SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END),0) AS active FROM gateway_requests WHERE gateway_id=? AND started>?", (profile['id'], instant-86400))
         return {**profile, 'fingerprint': engine.fingerprint(profile), 'base_path': '/g/'+profile['slug']+'/v1', 'last_24h': stats}
 
+    app.state.validate_gateway = validate_gateway
+
     def save_gateway(body, p, record_id=None):
         config = validate_gateway(body)
         previous = engine.profile(record_id) if record_id else None

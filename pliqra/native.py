@@ -67,7 +67,7 @@ def anthropic_request(body,model):
         if not parts:parts=[{'type':'text','text':''}]
         if messages and messages[-1]['role']==role:messages[-1]['content']+=parts
         else:messages.append({'role':role,'content':parts})
-    result={'model':model,'messages':messages,'max_tokens':body.get('max_completion_tokens',body.get('max_tokens',1024)),'stream':False}
+    result={'model':model,'messages':messages,'max_tokens':body.get('max_completion_tokens',body.get('max_tokens',1024)),'stream':bool(body.get('stream'))}
     if system:result['system']='\n'.join(system)
     for field in ('temperature','top_p'):
         if field in body:result[field]=body[field]
@@ -97,7 +97,7 @@ def responses_request(body,model):
         calls=message.get('tool_calls') or []
         if message.get('function_call'):calls=[{'id':'legacy_'+message['function_call']['name'],'function':message['function_call']}]
         for call in calls:items.append({'type':'function_call','call_id':call['id'],'name':call['function']['name'],'arguments':call['function']['arguments']})
-    result={'model':model,'input':items,'store':False,'stream':False,'max_output_tokens':body.get('max_completion_tokens',body.get('max_tokens',1024))}
+    result={'model':model,'input':items,'store':False,'stream':bool(body.get('stream')),'max_output_tokens':body.get('max_completion_tokens',body.get('max_tokens',1024))}
     for field in ('temperature','top_p','parallel_tool_calls'):
         if field in body:result[field]=body[field]
     tools=body.get('tools') or [{'type':'function','function':f} for f in body.get('functions',[])]
@@ -179,7 +179,7 @@ class GenerateInput(NativeInput):
 
 def native_to_chat(body,interface):
     result={k:body[k] for k in ('model','temperature','top_p','pliqra') if body.get(k) is not None}
-    result['stream']=False
+    result['stream']=bool(body.get('stream')) if interface in ('responses','anthropic') else False
     if interface=='responses':
         messages=[]
         if body.get('instructions'):messages.append({'role':'system','content':body['instructions']})
@@ -252,6 +252,20 @@ def mount(app):
         try:normalized=native_to_chat(body,interface)
         except (ValueError,TypeError,KeyError,AttributeError):raise HTTPException(422,'Unsupported or malformed native request')
         response=await app.state.gateway.chat(normalized,p)
+        if isinstance(response,StreamingResponse):
+            from .native_streaming import client_events
+            request_id=response.headers['X-Request-ID']
+            delivery=response.headers.get('X-Pliqra-Delivery','live_stream')
+            delivery=interface+'_live' if delivery=='live_stream' else delivery
+            app.state.store.update('events',request_id,{'delivery':delivery,'stream':1})
+            headers={k:v for k,v in response.headers.items() if k not in ('content-length','content-type')}
+            headers['x-pliqra-delivery']=delivery
+            def delivery_failed():
+                with app.state.store.transaction():
+                    app.state.store.update('events',request_id,{'status':'incomplete','error':'Native stream delivery did not complete'})
+                    app.state.store.update('gateway_requests',request_id,{'status':'incomplete'})
+            return StreamingResponse(client_events(response.body_iterator,interface,request_id,normalized['model'],delivery_failed),
+                                     media_type='text/event-stream',headers=headers,background=response.background)
         data=json.loads(response.body);request_id=response.headers['X-Request-ID']
         try:result=native_result(data,interface,request_id,normalized['model'])
         except (ValueError,TypeError,KeyError,AttributeError):
@@ -260,7 +274,7 @@ def mount(app):
                 app.state.store.update('gateway_requests',request_id,{'status':'error'})
             raise HTTPException(502,{'message':'Provider returned an invalid native result','request_id':request_id})
         app.state.store.update('events',request_id,{'delivery':interface+'_buffer' if body.get('stream') else interface,'stream':int(bool(body.get('stream')))})
-        headers={**dict(response.headers),'X-Pliqra-Delivery':interface+'_buffer' if body.get('stream') else interface}
+        headers={**dict(response.headers),'x-pliqra-delivery':interface+'_buffer' if body.get('stream') else interface}
         headers.pop('content-length',None);headers.pop('content-type',None)
         if not body.get('stream'):return JSONResponse(result,headers=headers)
         async def chunks():

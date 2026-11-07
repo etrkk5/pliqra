@@ -212,6 +212,8 @@ def create_app(data_dir=None, *, database_url=None, database_schema=None, encryp
             batch_worker_task=asyncio.create_task(batch_worker(app))
             from .platform import analytics_worker
             analytics_task=asyncio.create_task(analytics_worker(app))
+            from .fleet import worker as fleet_worker
+            fleet_task=asyncio.create_task(fleet_worker(app))
             try:
                 yield
             finally:
@@ -221,9 +223,10 @@ def create_app(data_dir=None, *, database_url=None, database_schema=None, encryp
                 if restart_task:restart_task.cancel()
                 batch_worker_task.cancel()
                 analytics_task.cancel()
+                fleet_task.cancel()
                 for job in list(app.state.jobs):
                     job.cancel()
-                await asyncio.gather(worker, heartbeat, batch_worker_task, analytics_task, *([restart_task] if restart_task else []), *list(app.state.jobs), return_exceptions=True)
+                await asyncio.gather(worker, heartbeat, batch_worker_task, analytics_task, fleet_task, *([restart_task] if restart_task else []), *list(app.state.jobs), return_exceptions=True)
                 app.state.gateway.cluster.close()
         store.close()
 
@@ -805,6 +808,8 @@ def create_app(data_dir=None, *, database_url=None, database_schema=None, encryp
     mount_platform(app)
     from .topology import mount as mount_topology
     mount_topology(app)
+    from .fleet import mount as mount_fleet
+    mount_fleet(app)
     from .identity_profiles import mount as mount_identity_profiles
     mount_identity_profiles(app)
     if organization is None:
