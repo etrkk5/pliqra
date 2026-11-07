@@ -6,7 +6,7 @@ The RC3 additions were validated on 7 November 2026; [synthetic acceptance](ACCE
 
 ## RC3 additions
 
-The final local Python 3.14 suite passes **205 tests**, with a real PostgreSQL 18 service configured, including the fleet and existing scale/multi-DC cases. Both independently installed SDK applications and all six official-native-client scenarios pass against synthetic providers with verified TLS. The console was exercised for instance visibility, two-target resource mapping and immutable proposal creation; the author sees no self-approval control. No real customer feedback is claimed. [Delivery checklist](DELIVERY_RC3.md) · [Fleet](FLEET.md) · [SDK installation](SDK.md)
+The local Python 3.14 baseline passed **205 tests** with a real PostgreSQL 18 service configured. A final native-usage correction added one regression case. At the published tag, both Python 3.13/3.14 jobs pass **173 tests** with 33 PostgreSQL cases explicitly skipped; the dedicated real-PostgreSQL job passes **43 cases** (including those 33 integration cases and ten shared SQLite fleet cases). Both independently installed SDK applications and all six official-native-client scenarios pass against synthetic providers with verified TLS. The console was exercised for instance visibility, two-target resource mapping and immutable proposal creation; the author sees no self-approval control. No real customer feedback is claimed. [Delivery checklist](DELIVERY_RC3.md) · [Fleet](FLEET.md) · [SDK installation](SDK.md)
 
 ## Delivered behavior
 

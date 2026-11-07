@@ -43,6 +43,8 @@ for await (const packet of connection.stream([{role: 'user', content: 'Hello'}])
 
 ES modules, Node 22+ and modern browser Fetch; TypeScript declarations are included. Browser applications must protect their scoped key and satisfy the gateway's origin policy. A browser bundle does not make a privileged key safe to disclose. Node private-CA trust uses `NODE_EXTRA_CA_CERTS`.
 
+Published candidates: [PyPI `pliqra-client`](https://pypi.org/project/pliqra-client/0.1.0rc1/) · [npm `@eturkok/pliqra`](https://www.npmjs.com/package/@eturkok/pliqra/v/0.1.0-rc.1). Anonymous registry downloads and clean installs were verified against the release artifact hashes.
+
 ## Without package registries
 
 Every gateway release carries the tested wheel, source distribution, npm tarball and `SDK-MANIFEST.json`, alongside `SHA256SUMS`. Download from the [RC3 release](https://github.com/eturkok/pliqra/releases/tag/v2.1.0-rc.3), verify checksums and install locally:
@@ -65,3 +67,5 @@ Discover → select service → bind capabilities/extensions → invoke. A chang
 Canonical SDK source lives in `sdk/`. `packaging/` contains metadata, not a second client implementation. `scripts/build_sdks.py` builds the artifacts; `scripts/check_sdk_install.py` installs them outside the source tree without production dependencies. CI uploads tested packages and the release workflow attaches those exact bytes.
 
 The manually dispatched [SDK publishing workflow](../.github/workflows/sdk-publish.yml) fetches a published release, verifies its source revision and hashes, then publishes the same assets. Configure a PyPI trusted publisher for `pliqra-client`, GitHub owner `eturkok`, repository `pliqra`, workflow `sdk-publish.yml`, environment `pypi`. The npm publisher for `@eturkok/pliqra` uses that workflow and environment `npm`; its initial package publication requires the owner's authenticated bootstrap. npm prereleases use the `next` tag. Trusted publishing uses short-lived job identity; no permanent registry token belongs in the repository. Never overwrite a published version.
+
+The initial npm artifact was bootstrapped with the owner’s authenticated CLI. Its configured GitHub publisher is now validated; an authenticated duplicate-version attempt confirmed immutable-version rejection. Re-dispatching publication for an existing version fails deliberately. [Publication evidence](ACCEPTANCE.md#published-distribution-acceptance).

@@ -1,0 +1,40 @@
+{
+  "synthetic": true,
+  "anonymous_registry_downloads": true,
+  "canonical_registry_installs": "passed",
+  "installed_registry_clients_invoked_synthetic_gateway": true,
+  "release_revision": "5c7ff226faa6f5ad466c2b6b457480cb9e76cb03",
+  "sdk_version": "0.1.0-rc.1",
+  "pypi_version": "0.1.0rc1",
+  "npm_version": "0.1.0-rc.1",
+  "npm_dist_tag": "next",
+  "artifacts": [
+    {
+      "file": "pliqra_client-0.1.0rc1-py3-none-any.whl",
+      "sha256": "477294f4cbb0ae70aad937fe10722f2e7eebf3f6135ee7d931306e670f3c6179",
+      "registry": "PyPI"
+    },
+    {
+      "file": "pliqra_client-0.1.0rc1.tar.gz",
+      "sha256": "b0ee59f70b919a4a83f779a3c2b7bd6ec98af58a1e7e6969f8ecbfa7130cc225",
+      "registry": "PyPI"
+    },
+    {
+      "file": "eturkok-pliqra-0.1.0-rc.1.tgz",
+      "sha256": "0fe84dd56f1d59babf132e1363ea1521987f6469393653679bff0b3521ef64ba",
+      "registry": "npm"
+    }
+  ],
+  "passed": true,
+  "pypi_trusted_publisher": "published via GitHub OIDC",
+  "npm_bootstrap": "owner-authenticated CLI",
+  "npm_trusted_publisher_status": "Valid",
+  "npm_oidc_negative_check": {
+    "workflow": "https://github.com/eturkok/pliqra/actions/runs/42398531788",
+    "expected": "E403 refusing to overwrite already-published 0.1.0-rc.1",
+    "new_version_published_by_this_check": false
+  },
+  "release_workflow": "https://github.com/eturkok/pliqra/actions/runs/42397575116",
+  "pypi_workflow": "https://github.com/eturkok/pliqra/actions/runs/42398046854",
+  "acceptance_workflow": "https://github.com/eturkok/pliqra/actions/runs/42397575118"
+}

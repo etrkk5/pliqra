@@ -97,3 +97,11 @@ The lab image was built from the pre-commit working tree. Its immutable image ID
 ## What remains a real-pilot responsibility
 
 Geographic WAN partitions/latency, PostgreSQL primary promotion and durability/RPO, real model saturation/quality, actual vendor billing, customer NeMo/Vault/identity providers and real human onboarding feedback are not simulated away. Ten minutes is an initial soak, not days of endurance evidence. Gateway RSS samples are a trend for this run, not a proof of leak absence. The controller's 24-hour summaries are asynchronously collected metadata, not an exact global billing ledger. A stable-release support envelope must be chosen for the actual deployment.
+
+## Published distribution acceptance
+
+[RC3](https://github.com/eturkok/pliqra/releases/tag/v2.1.0-rc.3) was published from `5c7ff226faa6f5ad466c2b6b457480cb9e76cb03`. Native AMD64/ARM64 image checks passed, including non-root execution and bundled Apache LICENSE/NOTICE; anonymous image access was verified. The final tagged synthetic acceptance workflow passed after the native usage correction.
+
+Both official registries serve SDK 0.1.0-rc.1: [PyPI](https://pypi.org/project/pliqra-client/0.1.0rc1/) and [npm](https://www.npmjs.com/package/@eturkok/pliqra/v/0.1.0-rc.1). Anonymous downloads matched the tested release hashes. Clean canonical registry installs and calls from those installed clients against the isolated synthetic gateway passed. [Registry/distribution evidence](evidence/registry-sdk-rc3.json).
+
+PyPI publication used the configured GitHub OIDC publisher. The first npm version used the owner-authenticated bootstrap; the subsequent GitHub OIDC attempt validated the npm trust and was intentionally rejected with E403 because the exact version already existed. The npm settings showed **Valid** afterward. This negative check did not overwrite the version or add provenance to the already published bootstrap artifact. Future new npm versions use the configured workflow.

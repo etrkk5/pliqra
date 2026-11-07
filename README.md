@@ -48,6 +48,8 @@ Open **http://localhost:8088**, create your administrator, then follow **connect
 
 **2.1.0-rc.3 is a release candidate for evaluation.** No source checkout, local build or registry login is required. [Release notes & downloads →](https://github.com/eturkok/pliqra/releases/tag/v2.1.0-rc.3)
 
+[Python SDK](https://pypi.org/project/pliqra-client/) · [JavaScript / TypeScript SDK](https://www.npmjs.com/package/@eturkok/pliqra) · [Install clients →](docs/SDK.md)
+
 [Image verification & upgrades →](docs/DISTRIBUTION.md) · [Source build & first call →](docs/GETTING_STARTED.md) · [Two-replica installation →](docs/PLATFORM.md#start-two-gateways)
 
 ## Multi-DC
