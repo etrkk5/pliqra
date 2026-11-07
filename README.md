@@ -79,3 +79,7 @@ Admitted calls can finish during draining. Disconnected sites stop admitting new
 | [Validation & scope](docs/RELEASE.md) | Automated/runtime evidence, exercised flows and operating limits |
 
 **Current candidate: [2.1.0-rc.2](https://github.com/etrkk5/pliqra/releases/tag/v2.1.0-rc.2).** The default remains a single container. Protocol draft 0.1; native APIs are documented subsets. [Roadmap delivery](docs/ROADMAP.md) separates implemented scope from external vendor acceptance and ecosystem adoption.
+
+## License
+
+[Apache-2.0](LICENSE) — free for personal and commercial use, modification and redistribution under its terms. Paid support and separately licensed future modules can be offered independently. [Licensing details →](docs/LICENSING.md)

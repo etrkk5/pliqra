@@ -5,6 +5,7 @@ ARG REVISION=unknown
 LABEL org.opencontainers.image.title="Pliqra" \
     org.opencontainers.image.description="Endpoint-first AI services, governed gateways and explicit model contracts" \
     org.opencontainers.image.source="https://github.com/etrkk5/pliqra" \
+    org.opencontainers.image.licenses="Apache-2.0" \
     org.opencontainers.image.version=$VERSION \
     org.opencontainers.image.revision=$REVISION
 
@@ -15,6 +16,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PLIQRA_PORT=8080
 
 WORKDIR /app
+COPY LICENSE NOTICE ./
 COPY requirements.lock .
 RUN pip install --no-cache-dir -r requirements.lock \
     && groupadd --gid 10001 pliqra \
