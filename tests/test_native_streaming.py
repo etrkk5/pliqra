@@ -44,6 +44,15 @@ def test_anthropic_multiple_text_blocks_keep_normalized_separators():
     assert ''.join(c['choices'][0]['delta'].get('content','') for c in chunks)=='First\nSecond'
 
 
+def test_anthropic_start_usage_is_never_substituted_for_missing_final_usage():
+    parser=Upstream('anthropic','request','service')
+    events=anthropic_events()
+    for event in events[:-2]:parser.feed(event)
+    malformed={**events[-2],'usage':{}}
+    with pytest.raises(KeyError):parser.feed(malformed)
+    assert not parser.terminal
+
+
 def responses_events(text='Native response', tool=False):
     item = {'type': 'function_call', 'id': 'fc_fixture', 'call_id': 'call_fixture', 'name': 'weather', 'arguments': ''} if tool else {'type': 'message', 'id': 'msg_fixture', 'role': 'assistant', 'content': []}
     events = [{'type': 'response.created', 'response': {'status': 'in_progress'}},

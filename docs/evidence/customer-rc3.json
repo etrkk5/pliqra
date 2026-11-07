@@ -14,7 +14,8 @@
     "docker_cpus": 14,
     "docker_memory_bytes": 8318976000,
     "runtime_python_source_sha256": "c99bdd687f7cb8c7ad489d80ec138707efd0327fa75123704e6e81933c524368",
-    "final_source_python_matches_tested_image": true
+    "final_source_python_matches_tested_image": false,
+    "subsequent_runtime_correction": "Anthropic streams now reject a message_delta that omits final output_tokens instead of treating the initial partial output count as final usage. Targeted native HTTP and parser tests cover this correction; the Chat load/soak path is unchanged."
   },
   "checks": [
     {

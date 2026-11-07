@@ -92,7 +92,7 @@ All onboarding, exact shared-quota, fleet, native-stream and model/database inte
 
 [Full lab results](evidence/customer-rc3.json) · [Installed SDK applications](evidence/customer-installed-clients-rc3.json) · [Official native clients](evidence/customer-official-clients-rc3.json)
 
-The lab image was built from the pre-commit working tree. Its immutable image ID and Python source SHA-256 are recorded; that Python source hash was checked against the final source tree. Subsequent changes were documentation, package/repository metadata and a console reviewer-identity label. CI validates the tagged distribution separately. These short measurements use deterministic, low-latency upstreams; they cannot establish production token throughput, a capacity limit or hardware sizing.
+The lab image was built from the pre-commit working tree. Its immutable image ID and Python source SHA-256 are recorded; that hash identifies the measured runtime. A subsequent native accounting correction rejects missing final Anthropic output usage; its targeted parser/HTTP tests pass and the measured Chat load/soak path is unchanged. Other subsequent changes were documentation, package/repository metadata and a console reviewer-identity label. CI validates the tagged distribution separately. These short measurements use deterministic, low-latency upstreams; they cannot establish production token throughput, a capacity limit or hardware sizing.
 
 ## What remains a real-pilot responsibility
 

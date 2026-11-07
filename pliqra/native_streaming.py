@@ -135,11 +135,11 @@ class Upstream:
             return []
         if kind == 'message_delta':
             self.reason = obj['delta'].get('stop_reason', self.reason)
-            usage = obj.get('usage') or {}
+            usage = obj['usage']
+            # The start event's output count is partial, never final billing evidence.
+            self.output_tokens = count(usage['output_tokens'])
             if 'input_tokens' in usage:
                 self.input_tokens = count(usage['input_tokens'])
-            if 'output_tokens' in usage:
-                self.output_tokens = count(usage['output_tokens'])
             return []
         if kind == 'message_stop':
             if not self.reason or any(not b['closed'] for b in self.blocks.values()):
