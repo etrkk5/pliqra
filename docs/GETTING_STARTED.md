@@ -4,7 +4,11 @@
 
 Run commands from the repository root. Bring an already running OpenAI-compatible or Ollama model endpoint.
 
-## Run with Docker
+## Run a prebuilt image
+
+For the published AMD64/ARM64 release candidate, follow [the prebuilt-image installation](DISTRIBUTION.md#install-the-release-candidate). It requires no source checkout or local build. The commands below build from source instead.
+
+## Build with Docker
 
 Prerequisites: Docker with Compose and an already running model endpoint.
 
@@ -21,13 +25,13 @@ Follow the three cards on **Overview**. Progress comes from retained successful 
 Prefer a single Docker command sequence?
 
 ```sh
-docker build -t pliqra:2.1.0 .
+docker build -t pliqra:2.1.0-rc.1 .
 docker run -d --name pliqra \
   -p 127.0.0.1:8088:8080 \
   -v pliqra-data:/data \
   --add-host host.docker.internal:host-gateway \
   --restart unless-stopped \
-  pliqra:2.1.0
+  pliqra:2.1.0-rc.1
 ```
 
 Open http://localhost:8088, create your administrator, then **Connect model**. Supply a running OpenAI-compatible or Ollama endpoint. Models become stable named AI services automatically. A manual model name handles servers without model-list discovery. No accounts, credentials, or sample traffic are seeded.
@@ -61,7 +65,7 @@ result = connection.complete([{"role": "user", "content": "Hello"}])
 # Contract changes raise ContractChanged (HTTP 409); explicitly discover/bind again.
 ```
 
-See [the protocol](PROTOCOL.md) for the handshake, portability boundary, and independent server. Product version 1.1 and protocol draft 0.1 have separate lifecycles. This is an implemented draft, not an established industry standard.
+See [the protocol](PROTOCOL.md) for the handshake, portability boundary, and independent server. Product releases and protocol draft 0.1 have separate lifecycles. This is an implemented draft, not an established industry standard.
 
 ## Local development and validation
 

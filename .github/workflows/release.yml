@@ -1,0 +1,145 @@
+name: Release
+on:
+  push:
+    tags: ['v[0-9]*']
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  metadata:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+      notes: ${{ steps.release.outputs.notes }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - id: release
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python scripts/release_metadata.py "$RELEASE_TAG" --github-output "$GITHUB_OUTPUT"
+  tests:
+    needs: metadata
+    uses: ./.github/workflows/test.yml
+  image:
+    needs: [metadata, tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Refuse to overwrite an existing image tag
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}:${{ needs.metadata.outputs.version }}
+        run: |
+          if docker buildx imagetools inspect "$IMAGE" > /dev/null 2>&1; then
+            echo "Image tag already exists. Use a new release version; rerun only failed downstream jobs."
+            exit 1
+          fi
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        id: build
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ghcr.io/${{ github.repository }}:${{ needs.metadata.outputs.version }}
+          build-args: |
+            VERSION=${{ needs.metadata.outputs.version }}
+            REVISION=${{ github.sha }}
+          sbom: true
+          provenance: mode=max
+          cache-from: type=gha,scope=release
+          cache-to: type=gha,mode=max,scope=release
+  smoke:
+    needs: [metadata, image]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux/amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify the published image on its native architecture
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}@${{ needs.image.outputs.digest }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+          REVISION: ${{ github.sha }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -eu
+          docker pull --platform "$PLATFORM" "$IMAGE"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE")" = "$REVISION"
+          test "$(docker image inspect --format '{{ .Config.User }}' "$IMAGE")" = 'pliqra:pliqra'
+          docker run -d --name pliqra-release-check -p 127.0.0.1:8088:8080 "$IMAGE"
+          trap 'docker logs pliqra-release-check; docker rm -fv pliqra-release-check' EXIT
+          python scripts/smoke_release.py http://127.0.0.1:8088 "$VERSION"
+  publish:
+    needs: [metadata, image, smoke]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.metadata.outputs.version }}
+      DIGEST: ${{ needs.image.outputs.digest }}
+      PRERELEASE: ${{ needs.metadata.outputs.prerelease }}
+      NOTES: ${{ needs.metadata.outputs.notes }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Require anonymous access to the exact published image
+        env:
+          IMAGE_REPOSITORY: ${{ github.repository }}
+        run: python scripts/verify_public_image.py "$IMAGE_REPOSITORY" "$VERSION" "$DIGEST"
+      - name: Attach installation files and digest, then publish the release
+        run: |
+          set -eu
+          mkdir -p dist
+          cp compose.release.yaml dist/compose.release.yaml
+          cp docs/DISTRIBUTION.md dist/DISTRIBUTION.md
+          printf 'ghcr.io/%s@%s\n' "$GITHUB_REPOSITORY" "$DIGEST" > dist/image.txt
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          Path('dist/release.json').write_text(json.dumps({
+              'tag': os.environ['RELEASE_TAG'], 'version': os.environ['VERSION'],
+              'revision': os.environ['GITHUB_SHA'], 'image': 'ghcr.io/' + os.environ['GITHUB_REPOSITORY'],
+              'digest': os.environ['DIGEST'], 'platforms': ['linux/amd64', 'linux/arm64'],
+              'prerelease': os.environ['PRERELEASE'] == 'true', 'schema': 5,
+              'inference_contract': 4, 'protocol': 'pliqra/0.1-draft'
+          }, indent=2) + '\n')
+          PY
+          (cd dist && sha256sum compose.release.yaml DISTRIBUTION.md image.txt release.json > SHA256SUMS)
+          cp "$NOTES" dist/notes.md
+          printf '\n## Exact image\n\n`ghcr.io/%s@%s`\n\nAMD64 and ARM64; SBOM and build provenance are attached to the OCI image.\n' "$GITHUB_REPOSITORY" "$DIGEST" >> dist/notes.md
+          if [ "$PRERELEASE" = true ]; then
+            gh release create "$RELEASE_TAG" --verify-tag --title "Pliqra $VERSION" --prerelease --latest=false --notes-file dist/notes.md dist/compose.release.yaml dist/DISTRIBUTION.md dist/image.txt dist/release.json dist/SHA256SUMS
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --title "Pliqra $VERSION" --latest --notes-file dist/notes.md dist/compose.release.yaml dist/DISTRIBUTION.md dist/image.txt dist/release.json dist/SHA256SUMS
+          fi

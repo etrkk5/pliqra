@@ -4,7 +4,9 @@
 
 Configuration, persistent data, recovery and release boundaries for a self-hosted workspace.
 
-## Upgrade from 1.1 to 1.2
+For current prebuilt images, digest verification and release upgrades, see [distribution](DISTRIBUTION.md). Version 2.1 uses schema 5 and inference contract revision 4; follow [the current multi-DC upgrade procedure](MULTI_DC.md#evidence-and-upgrade) for shared deployments.
+
+## Historical upgrade from 1.1 to 1.2
 
 Take a backup and stop active inference, evaluations and explicit provider checks before replacing the image. Keep the existing data volume and encryption key.
 
@@ -72,7 +74,7 @@ docker run -d --name pliqra \
   -p 127.0.0.1:8088:8080 \
   -v modelport-data:/data \
   --add-host host.docker.internal:host-gateway \
-  --restart unless-stopped pliqra:2.1.0
+  --restart unless-stopped pliqra:2.1.0-rc.1
 ```
 
 The volume name is an existing storage reference, not the product name. Do not run the old and new processes on the same volume simultaneously. Restore the pre-upgrade backup before returning to the old build.
