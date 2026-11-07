@@ -130,7 +130,7 @@ class Lab:
             time.sleep(1)
 
     def setup(self):
-        self.compose('up','-d','--pull','never')
+        self.compose('up','-d','--pull','missing')
         for session in self.sessions:self.wait(session)
         password=secrets.token_urlsafe(24)
         for session,label,email in [(self.west,'Synthetic shared workspace','operator@example.test'),(self.branch,'Synthetic independent branch','operator@example.test'),(self.controller,'Synthetic fleet author','author@example.test')]:
